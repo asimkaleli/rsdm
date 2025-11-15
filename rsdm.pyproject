@@ -1,0 +1,3 @@
+{
+    "files": ["dimetix.py","laser_gpio.py","dimetix_worker.py","rsdm.py","motor_control.py","camera_controller.py","form.ui","orientation.py","clickable_label.py","laser_path_planner.py"]
+}
