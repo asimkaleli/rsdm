@@ -6,8 +6,8 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>1602</width>
-    <height>571</height>
+    <width>1876</width>
+    <height>699</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -28,7 +28,7 @@ QGroupBox::title {
      <x>0</x>
      <y>0</y>
      <width>878</width>
-     <height>524</height>
+     <height>691</height>
     </rect>
    </property>
    <property name="font">
@@ -46,7 +46,7 @@ QGroupBox::title {
     <property name="geometry">
      <rect>
       <x>12</x>
-      <y>35</y>
+      <y>135</y>
       <width>854</width>
       <height>480</height>
      </rect>
@@ -84,7 +84,7 @@ QGroupBox::title {
      <x>1120</x>
      <y>0</y>
      <width>221</width>
-     <height>524</height>
+     <height>691</height>
     </rect>
    </property>
    <property name="font">
@@ -99,6 +99,55 @@ QGroupBox::title {
     <set>Qt::AlignCenter</set>
    </property>
    <layout class="QGridLayout" name="gridLayout_3">
+    <item row="4" column="0">
+     <widget class="QGroupBox" name="groupBox_5">
+      <property name="font">
+       <font>
+        <bold>true</bold>
+       </font>
+      </property>
+      <property name="title">
+       <string>Automatic</string>
+      </property>
+      <property name="alignment">
+       <set>Qt::AlignCenter</set>
+      </property>
+      <layout class="QGridLayout" name="gridLayout_15">
+       <item row="0" column="0">
+        <layout class="QGridLayout" name="gridLayout_8">
+         <item row="0" column="0">
+          <widget class="QPushButton" name="pbNextPoint">
+           <property name="text">
+            <string>Next Point</string>
+           </property>
+          </widget>
+         </item>
+         <item row="1" column="0">
+          <widget class="QLabel" name="label_5">
+           <property name="text">
+            <string>Scanning Speed (sn):</string>
+           </property>
+          </widget>
+         </item>
+         <item row="2" column="0">
+          <widget class="QLineEdit" name="leScanInterval">
+           <property name="text">
+            <string>5</string>
+           </property>
+          </widget>
+         </item>
+         <item row="3" column="0">
+          <widget class="QPushButton" name="pbScanPoints">
+           <property name="text">
+            <string>Scan Points</string>
+           </property>
+          </widget>
+         </item>
+        </layout>
+       </item>
+      </layout>
+     </widget>
+    </item>
     <item row="2" column="0">
      <widget class="QGroupBox" name="groupBox_8">
       <property name="font">
@@ -258,50 +307,25 @@ QGroupBox::title {
      </widget>
     </item>
     <item row="3" column="0">
-     <widget class="QGroupBox" name="groupBox_5">
+     <widget class="QGroupBox" name="groupBox_10">
       <property name="font">
        <font>
         <bold>true</bold>
        </font>
       </property>
       <property name="title">
-       <string>Automatic</string>
+       <string>Manual Save Point</string>
       </property>
       <property name="alignment">
        <set>Qt::AlignCenter</set>
       </property>
-      <layout class="QGridLayout" name="gridLayout_15">
+      <layout class="QGridLayout" name="gridLayout_17">
        <item row="0" column="0">
-        <layout class="QGridLayout" name="gridLayout_8">
-         <item row="0" column="0">
-          <widget class="QPushButton" name="pbNextPoint">
-           <property name="text">
-            <string>Next Point</string>
-           </property>
-          </widget>
-         </item>
-         <item row="1" column="0">
-          <widget class="QLabel" name="label_5">
-           <property name="text">
-            <string>Scanning Speed (sn):</string>
-           </property>
-          </widget>
-         </item>
-         <item row="2" column="0">
-          <widget class="QLineEdit" name="leScanInterval">
-           <property name="text">
-            <string>5</string>
-           </property>
-          </widget>
-         </item>
-         <item row="3" column="0">
-          <widget class="QPushButton" name="pbScanPoints">
-           <property name="text">
-            <string>Scan Points</string>
-           </property>
-          </widget>
-         </item>
-        </layout>
+        <widget class="QPushButton" name="pbStorePoint">
+         <property name="text">
+          <string>Store Point</string>
+         </property>
+        </widget>
        </item>
       </layout>
      </widget>
@@ -314,7 +338,7 @@ QGroupBox::title {
      <x>879</x>
      <y>0</y>
      <width>241</width>
-     <height>524</height>
+     <height>691</height>
     </rect>
    </property>
    <property name="font">
@@ -430,7 +454,7 @@ QGroupBox::title {
      <x>1342</x>
      <y>0</y>
      <width>251</width>
-     <height>524</height>
+     <height>691</height>
     </rect>
    </property>
    <property name="font">
@@ -582,23 +606,30 @@ QGroupBox::title {
      </widget>
     </item>
     <item row="1" column="0">
-     <widget class="QGroupBox" name="groupBox_10">
+     <widget class="QGroupBox" name="groupBox_11">
       <property name="font">
        <font>
         <bold>true</bold>
        </font>
       </property>
       <property name="title">
-       <string>Manual Save Point</string>
+       <string>Save Log</string>
       </property>
       <property name="alignment">
        <set>Qt::AlignCenter</set>
       </property>
-      <layout class="QGridLayout" name="gridLayout_17">
+      <layout class="QGridLayout" name="gridLayout_16">
        <item row="0" column="0">
-        <widget class="QPushButton" name="pbStorePoint">
+        <widget class="QPushButton" name="pbStartLoging">
          <property name="text">
-          <string>Store Point</string>
+          <string>Start Loging</string>
+         </property>
+        </widget>
+       </item>
+       <item row="1" column="0">
+        <widget class="QPushButton" name="pbStopLoging">
+         <property name="text">
+          <string>Stop Loging</string>
          </property>
         </widget>
        </item>
@@ -606,6 +637,52 @@ QGroupBox::title {
      </widget>
     </item>
    </layout>
+  </widget>
+  <widget class="QPushButton" name="test_r_btn">
+   <property name="geometry">
+    <rect>
+     <x>1620</x>
+     <y>280</y>
+     <width>203</width>
+     <height>30</height>
+    </rect>
+   </property>
+   <property name="text">
+    <string>Test-Right</string>
+   </property>
+  </widget>
+  <widget class="QLineEdit" name="test_r_label">
+   <property name="geometry">
+    <rect>
+     <x>1620</x>
+     <y>230</y>
+     <width>201</width>
+     <height>29</height>
+    </rect>
+   </property>
+  </widget>
+  <widget class="QPushButton" name="test_l_btn">
+   <property name="geometry">
+    <rect>
+     <x>1620</x>
+     <y>370</y>
+     <width>203</width>
+     <height>30</height>
+    </rect>
+   </property>
+   <property name="text">
+    <string>Test-Left</string>
+   </property>
+  </widget>
+  <widget class="QLineEdit" name="test_l_label">
+   <property name="geometry">
+    <rect>
+     <x>1620</x>
+     <y>320</y>
+     <width>201</width>
+     <height>29</height>
+    </rect>
+   </property>
   </widget>
  </widget>
  <resources/>

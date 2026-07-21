@@ -60,8 +60,6 @@ def send_cmd_open(ser, cmd: str = "s0g", timeout: float = 1.5):
     """
     old_to, old_wto = getattr(ser, "timeout", None), getattr(ser, "write_timeout", None)
 
-    print("send cmd:", cmd)
-
     try:
         # Geçici timeout (kopuk portta burada bile hata olabilir)
         try:

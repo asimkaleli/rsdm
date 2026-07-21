@@ -39,8 +39,9 @@ from motor_control import MotorController, MotorPins, SharedPins
 # Yalnızca planlayıcıyı kullanacağız (fallback yok)
 from laser_path_planner import plan_laser_path, StepperConfig
 
-T = TypeVar("T")
+from datetime import datetime
 
+T = TypeVar("T")
 
 class rsdm(QWidget):
     # ----------- KALİBRASYON (kendine göre güncelle) -----------
@@ -173,9 +174,20 @@ QGroupBox::title {
         self._planner_result = None  # dict: xyz, dpy, pitch_steps_delta, yaw_steps_delta
         self._scan_step_index = 0    # manuel tarama için segment index
 
+        # --- Loglama (pitch, yaw, mesafe, zaman) ---
+        self._logging_enabled = False
+        self._log_file = None
+        self._log_path = None
+        self._last_distance_unit = ""    # Dimetix'ten gelen birim ("m" vb.)
+
+        # Hangi satırda beklerken zaman serisi loglanacağını tut
+        self._current_log_row = None
+        self._last_log_row = None
+
         # --- Hız combobox varsayılanı uygulansın (UI hazır olduğunda) ---
         if self.ui.cbMotorSpeed:
             QTimer.singleShot(0, self._apply_initial_speed_from_combo)
+
 
     # ---------- UI yükleme ve widget bağlama ----------
     def load_ui(self):
@@ -225,6 +237,7 @@ QGroupBox::title {
         self.ui.cbModeDistance = self.w(QCheckBox, "cbModeDistance", required=False)
         self.ui.cbModeSignalQuality = self.w(QCheckBox, "cbModeSignalQuality", required=False)
 
+        self.ui.leManualMeasure = self.w(QLineEdit, "leManualMeasure", required=False)
         self.ui.leDistance = self.w(QLineEdit, "leDistance", required=False)
         self.ui.leDistanceInterval = self.w(QLineEdit, "leDistanceInterval", required=False)
         self.ui.leSignalQuality = self.w(QLineEdit, "leSignalQuality", required=False)
@@ -267,14 +280,26 @@ QGroupBox::title {
         if self.ui.leScanInterval and not self.ui.leScanInterval.text().strip():
             self.ui.leScanInterval.setText("5")  # saniye varsayılan
 
+        self.ui.pbStartLoging = self.w(QPushButton, "pbStartLoging", required=False)
+        self.ui.pbStopLoging = self.w(QPushButton, "pbStopLoging", required=False)
+
+        self.ui.test_l_btn = self.w(QPushButton, "test_l_btn", required=False)
+        self.ui.test_r_btn = self.w(QPushButton, "test_r_btn", required=False)
+        self.ui.test_l_label = self.w(QLineEdit,  "test_l_label", required=False)
+        self.ui.test_r_label = self.w(QLineEdit,  "test_r_label", required=False)
+
+
+
+
+
+
     def connect_signals(self):
         # Dosya seç
         self.ui.btnSelect.clicked.connect(self.select_button_clicked)
         # Label tıklama
         self.label.clicked.connect(self.on_label_clicked)
         # Elle marker ekleme
-        if self.ui.xyAddButton and self.ui.xInput and self.ui.yInput:
-            self.ui.xyAddButton.clicked.connect(self.add_manual_marker)
+        self.ui.xyAddButton.clicked.connect(self.add_manual_marker)
 
         # Sıralı seçim
         self.ui.btnSeqFirst.clicked.connect(self.on_select_first_clicked)
@@ -286,45 +311,43 @@ QGroupBox::title {
         self.ui.table.model().rowsRemoved.connect(self.on_rows_removed)
 
         # Motor butonları
-        if self.ui.btnRight:
-            self.ui.btnRight.pressed.connect(self._x_right_press)
-            self.ui.btnRight.released.connect(self._x_stop)
-        if self.ui.btnLeft:
-            self.ui.btnLeft.pressed.connect(self._x_left_press)
-            self.ui.btnLeft.released.connect(self._x_stop)
-        if self.ui.btnUp:
-            self.ui.btnUp.pressed.connect(self._y_up_press)
-            self.ui.btnUp.released.connect(self._y_stop)
-        if self.ui.btnDown:
-            self.ui.btnDown.pressed.connect(self._y_down_press)
-            self.ui.btnDown.released.connect(self._y_stop)
+        self.ui.btnRight.pressed.connect(self._x_right_press)
+        self.ui.btnRight.released.connect(self._x_stop)
+        self.ui.btnLeft.pressed.connect(self._x_left_press)
+        self.ui.btnLeft.released.connect(self._x_stop)
+        self.ui.btnUp.pressed.connect(self._y_up_press)
+        self.ui.btnUp.released.connect(self._y_stop)
+        self.ui.btnDown.pressed.connect(self._y_down_press)
+        self.ui.btnDown.released.connect(self._y_stop)
 
-        # Lazer
-        if self.ui.cbLazer:
-            self.ui.cbLazer.toggled.connect(self.on_laser_toggled)
-
-        # Manuel ölçüm → readOnly toggle
-        if self.ui.cbManualMeasure:
-            self.ui.cbManualMeasure.toggled.connect(self.on_manual_measure_select)
-
-        if self.ui.cbModeDistance:
-            self.ui.cbModeDistance.toggled.connect(self.on_mode_distance_select)
-            self.ui.cbModeDistance.setChecked(True)
-
-        if self.ui.cbModeSignalQuality:
-            self.ui.cbModeSignalQuality.toggled.connect(self.on_signal_quality_select)
-
+        self.ui.cbLazer.toggled.connect(self.on_laser_toggled)
+        self.ui.cbManualMeasure.toggled.connect(self.on_manual_measure_select)
+        self.ui.cbModeDistance.toggled.connect(self.on_mode_distance_select)
+        self.ui.cbModeDistance.setChecked(True)
+        self.ui.cbModeSignalQuality.toggled.connect(self.on_signal_quality_select)
         # Hız combobox
-        if self.ui.cbMotorSpeed:
-            self.init_speed_combo()
-
+        self.init_speed_combo()
         # Tarama butonu
-        if self.ui.pbScanPoints:
-            self.ui.pbScanPoints.clicked.connect(self.on_scan_points_clicked)
-
+        self.ui.pbScanPoints.clicked.connect(self.on_scan_points_clicked)
         # Pitch/Yaw nokta kaydetme (pbStorePoint)
-        if self.ui.pbStorePoint:
-            self.ui.pbStorePoint.clicked.connect(self.on_pb_store_point)
+        self.ui.pbStorePoint.clicked.connect(self.on_pb_store_point)
+
+        self.ui.pbStartLoging.clicked.connect(self.on_pb_start_logging)
+        self.ui.pbStopLoging.clicked.connect(self.on_pb_stop_logging)
+
+        self.ui.test_l_btn.clicked.connect(self.on_test_l_btn)
+        self.ui.test_r_btn.clicked.connect(self.on_test_r_btn)
+
+
+    def on_test_l_btn(self):
+
+        self.motorX.set_direction(True)
+        self.motorX.move_steps(int(self.ui.test_l_label.text()))
+
+
+    def on_test_r_btn(self):
+        self.motorX.set_direction(False)
+        self.motorX.move_steps(int(self.ui.test_r_label.text()))
 
     # ---------- Tablo ayarı ----------
     def setup_table(self):
@@ -342,8 +365,41 @@ QGroupBox::title {
             return
 
         self._last_distance = float(value)
+        self._last_distance_unit = unit or ""
+
         if self.ui.leDistance:
             self.ui.leDistance.setText(f"{value:.4f} {unit}")
+
+        # --- LOG KISMI ---
+        # Sadece:
+        # - Log açıkken
+        # - Dosya varken
+        # - Her iki motor da BUSY DEĞİLKEN (yani durağan haldeyken)
+        # log al.
+        if not (self._logging_enabled and self._log_file):
+            return
+
+        try:
+            # Eğer motor objeleri yoksa (init hata vs.) loglama
+            if not hasattr(self, "motorX") or not hasattr(self, "motorY"):
+                return
+
+            if self.motorX.is_busy() or self.motorY.is_busy():
+                # Hareket sırasında → hiç log alma
+                return
+        except Exception:
+            # Motor is_busy() çağrısında bir problem olursa güvenlik için loglama
+            return
+
+        # Buraya geldiysek: motorlar duruyor.
+        # Açısal modda isek _current_log_row o anki hedef row’u temsil eder.
+        row_idx = self._current_log_row
+
+        # Eğer tanımlı bir row yoksa log alma (boş row istemiyorsan)
+        if row_idx is None:
+            return
+
+        self._log_current_state(row_index=row_idx)
 
     def _on_dim_strength(self, value: float, unit: str):
         if self.ui.cbModeSignalQuality and not self.ui.cbModeSignalQuality.isChecked():
@@ -372,6 +428,8 @@ QGroupBox::title {
             if checked:
                 if not self.dim_worker.isRunning():
                     QTimer.singleShot(1500, lambda: self.dim_worker.start())
+
+                self.ui.leManualMeasure.setEnabled(False)
             else:
                 if self.dim_worker.isRunning():
                     self.dim_worker.stop()
@@ -386,6 +444,7 @@ QGroupBox::title {
                     self.ui.leSignalQuality.setText("--")
                     self.ui.cbModeDistance.setChecked(False)
                     self.ui.cbModeSignalQuality.setChecked(False)
+                    self.ui.leManualMeasure.setEnabled(True)
         except Exception as e:
             QMessageBox.critical(self, "Dimetix Worker", str(e))
 
@@ -559,14 +618,14 @@ QGroupBox::title {
 
     def _y_up_press(self):
         try:
-            self.motorY.set_direction(False)
+            self.motorY.set_direction(True)
             self.motorY.start_jog()
         except Exception as e:
             QMessageBox.critical(self, "Motor Y", str(e))
 
     def _y_down_press(self):
         try:
-            self.motorY.set_direction(True)
+            self.motorY.set_direction(False)
             self.motorY.start_jog()
         except Exception as e:
             QMessageBox.critical(self, "Motor Y", str(e))
@@ -835,6 +894,9 @@ QGroupBox::title {
         print(f"    cur_dy={cur_dy_steps}  target_dy={target_dy_steps}  delta_y={delta_y}")
         sys.stdout.flush()
 
+        # --- HAREKETTEN ÖNCE: log satırını temizle ---
+        self._current_log_row = None
+
         # Hareketleri sırayla gönder
         self._move_signed_steps(self.motorX, delta_x)
         self._move_signed_steps(self.motorY, delta_y)
@@ -844,12 +906,60 @@ QGroupBox::title {
                                  f"Row {row} konumuna giderken zaman aşımı.")
             return False
 
-        # İstenirse noktalar arası bekleme
+        # --- HAREKET BİTTİ: Artık bu row'dayız → loglar bu row'a yazılsın ---
+        self._current_log_row = row
+        self._last_log_row = row
+
+        # Buradan sonra gelen tüm mesafe ölçümleri bu satıra loglanacak
         if wait_s > 0:
             self._wait_seconds(wait_s)
 
         return True
 
+
+    def _log_angle_row(self, row: int):
+        """
+        Verilen angle satırı için:
+        - Pitch (deg)
+        - Yaw   (deg)
+        - Son mesafe (self._last_distance)
+        - Zaman (ISO)
+        değerlerini log dosyasına yazar.
+        """
+        if not (self._logging_enabled and self._log_file):
+            return
+
+        table = self.ui.table
+        pitch_item = table.item(row, 0)
+        yaw_item   = table.item(row, 1)
+        if pitch_item is None or yaw_item is None:
+            return
+
+        try:
+            pitch = float(pitch_item.text())
+            yaw   = float(yaw_item.text())
+        except ValueError:
+            return
+
+        dist = self._last_distance
+        unit = self._last_distance_unit or ""
+        ts   = datetime.now().isoformat(timespec="seconds")
+
+        # CSV satırı: row,pitch,yaw,distance,unit,timestamp
+        line = f"{row},{pitch:.4f},{yaw:.4f},"
+        if dist is not None:
+            line += f"{dist:.4f},{unit}"
+        else:
+            line += ","  # mesafe yoksa boş bırak
+        line += f",{ts}\n"
+
+        try:
+            self._log_file.write(line)
+            self._log_file.flush()
+        except Exception as e:
+            self._logging_enabled = False
+            QMessageBox.critical(self, "Log Hatası",
+                                 f"Log dosyasına yazarken hata oluştu, log durduruldu:\n{e}")
 
     # ---------- Seçim ve adım sayacı ----------
     def _reset_step_counters(self):
@@ -906,11 +1016,13 @@ QGroupBox::title {
     def on_pb_store_point(self):
         """
         pbStorePoint:
-        1) İlk tıklamada mevcut konumu referans (0,0) olarak alır (Pitch=0, Yaw=0).
-        2) Sonraki tıklamalarda referansa göre step farkından Pitch/Yaw açılarını hesaplar.
-        3) Sonucu coordTable'a yazar:
-           - 1. sütun: Pitch (deg)
-           - 2. sütun: Yaw   (deg)
+        1) coordTable BOŞSA:
+           - Bu konumu referans (ilk nokta) olarak alır.
+           - Pitch=0, Yaw=0 yazar.
+           - _scan_angle_index sıfırlanır (Next Point yeni listede baştan başlar).
+        2) coordTable BOŞ DEĞİLSE:
+           - Mevcut referansa göre Pitch/Yaw hesaplar ve yeni satır ekler.
+        3) Satır tipini 'angle' olarak işaretler (Next/Scan Points buna göre çalışır).
         """
         table = self.ui.table
 
@@ -918,13 +1030,24 @@ QGroupBox::title {
         sx = self._steps_x_abs   # MotorX → Yaw
         sy = self._steps_y_abs   # MotorY → Pitch
 
-        if self._origin_steps_x is None or self._origin_steps_y is None:
-            # İlk nokta: referans (0,0)
+        row_count = table.rowCount()
+
+        # --- 1) Tabloda hiç satır yoksa: ilk nokta (referans) ---
+        if row_count == 0:
+            # Bu çağrıyı "ilk nokta" olarak kabul et
             self._origin_steps_x = sx
             self._origin_steps_y = sy
+            self._scan_angle_index = 0  # Next Point sıfırdan başlasın
+
             pitch_deg = 0.0
             yaw_deg = 0.0
+
         else:
+            # Referans henüz set edilmemişse, bu çağrıda set et
+            if self._origin_steps_x is None or self._origin_steps_y is None:
+                self._origin_steps_x = sx
+                self._origin_steps_y = sy
+
             dx_steps = sx - self._origin_steps_x
             dy_steps = sy - self._origin_steps_y
 
@@ -936,7 +1059,7 @@ QGroupBox::title {
             yaw_deg = dx_steps * deg_per_step_x
             pitch_deg = dy_steps * deg_per_step_y
 
-        # Tabloya satır ekle (0: Pitch, 1: Yaw)
+        # --- Ortak kısım: tabloya satır ekle ---
         row = table.rowCount()
         table.insertRow(row)
 
@@ -965,7 +1088,166 @@ QGroupBox::title {
         self._last_store_row = row
         self._awaiting_marker_click = True
 
+        # === LOG İÇİN AKTİF SATIR OLARAK İŞARETLE ===
+        # Artık bu açı noktasına "erişmiş" sayıyoruz; log açıksa,
+        # bu row için gelen tüm mesafe ölçümleri CSV'ye yazılacak.
+        self._current_log_row = row
+        self._last_log_row = row
 
+
+    def on_pb_start_logging(self):
+        """
+        Start Log:
+        - Kullanıcıdan bir CSV dosya yolu ister.
+        - Dosyayı açar, gerekiyorsa başlık yazar.
+        - _logging_enabled True yapılır.
+        """
+        if self._logging_enabled:
+            QMessageBox.information(self, "Log", "Loglama zaten açık.")
+            return
+
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Log dosyası seç (CSV)",
+            "",
+            "CSV Files (*.csv);;All Files (*)"
+        )
+        if not path:
+            return
+
+        try:
+            f = open(path, "w", encoding="utf-8", newline="")
+        except Exception as e:
+            QMessageBox.critical(self, "Log", f"Dosya açılamadı:\n{e}")
+            return
+
+        # Dosya boşsa başlık satırı yaz
+        if f.tell() == 0:
+            f.write("row,pitch_deg,yaw_deg,distance,unit,timestamp\n")
+
+        self._log_file = f
+        self._log_path = path
+        self._logging_enabled = True
+
+        self._current_log_row = None
+        self._last_log_row = None
+
+        QMessageBox.information(self, "Log", f"Loglama başlatıldı:\n{path}")
+
+    def on_pb_stop_logging(self):
+        """
+        Stop Log:
+        - Loglamayı kapatır, dosyayı flush + close yapar.
+        """
+        if not self._logging_enabled:
+            return
+
+        self._logging_enabled = False
+        if self._log_file:
+            try:
+                self._log_file.flush()
+                self._log_file.close()
+            except Exception:
+                pass
+        self._log_file = None
+
+        QMessageBox.information(self, "Log", "Loglama durduruldu.")
+
+    def _log_current_state(self, row_index=None):
+        """
+        Şu anki durumu loglar:
+        - row: coordTable satır numarası (1..N) → row_index + 1
+        - pitch / yaw: coordTable satırından
+        - distance / unit: self._last_distance, self._last_distance_unit
+        - timestamp: now() (okunabilir format: YYYY-MM-DD HH:MM:SS)
+        """
+        if not (self._logging_enabled and self._log_file):
+            return
+
+        if self.motorX.is_busy() or self.motorY.is_busy():
+            return  # motor hareketliyken loglama
+
+        pitch = None
+        yaw = None
+
+        # 1) Eğer tablo satırı verilmişse oradan okumayı dene
+        if row_index is not None:
+            try:
+                table = self.ui.table
+                if 0 <= row_index < table.rowCount():
+                    p_item = table.item(row_index, 0)
+                    y_item = table.item(row_index, 1)
+                    if p_item is not None:
+                        pitch = float(p_item.text())
+                    if y_item is not None:
+                        yaw = float(y_item.text())
+            except Exception:
+                pitch = None
+                yaw = None
+
+        # 2) Olmadıysa IMU textbox'lardan oku
+        if pitch is None and self.ui.pitchLe:
+            try:
+                pitch = float(self.ui.pitchLe.text())
+            except Exception:
+                pitch = None
+
+        if yaw is None and self.ui.yawLe:
+            try:
+                yaw = float(self.ui.yawLe.text())
+            except Exception:
+                yaw = None
+
+        dist = self._last_distance
+        unit = self._last_distance_unit or ""
+
+        # Daha okunabilir zaman: "2025-11-16 15:27:15"
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        # CSV satırı: row,pitch_deg,yaw_deg,distance,unit,timestamp
+        parts = []
+
+        # row (coordTable satır numarası + 1)
+        if row_index is not None:
+            parts.append(str(row_index + 1))
+        else:
+            parts.append("")
+
+        # pitch
+        if pitch is not None:
+            parts.append(f"{pitch:.4f}")
+        else:
+            parts.append("")
+
+        # yaw
+        if yaw is not None:
+            parts.append(f"{yaw:.4f}")
+        else:
+            parts.append("")
+
+        # distance + unit
+        if dist is not None:
+            parts.append(f"{dist:.4f}")
+            parts.append(unit)
+        else:
+            parts.append("")
+            parts.append("")
+
+        # timestamp
+        parts.append(ts)
+
+        line = ",".join(parts) + "\n"
+
+        try:
+            self._log_file.write(line)
+            self._log_file.flush()
+        except Exception as e:
+            self._logging_enabled = False
+            QMessageBox.critical(
+                self,
+                "Log Hatası",
+                f"Log dosyasına yazarken hata oluştu, log durduruldu:\n{e}",
+            )
 
 
     # ---------- Planlama & tarama ----------
@@ -1105,8 +1387,8 @@ QGroupBox::title {
         """
         İKİ MOD:
         1) Eğer tabloda pvStorePoint ile kaydedilmiş 'angle' satırları varsa:
-           - Bunlara göre sırayla, SON → İLK olacak şekilde hareket eder.
-             (Her Next Point basışında bir sonraki açı noktasına gider.)
+           - Bunlara göre SON NOKTADAN İLK NOKTAYA DOĞRU ilerler.
+             (Son satırda olduğun varsayılır; ilk hareket ikinci sondan başlar.)
         2) Eğer hiç angle satırı yoksa:
            - Eski davranış: planner_result içindeki step deltalarına göre çalışır.
         """
@@ -1114,16 +1396,31 @@ QGroupBox::title {
 
         # --- 1) Yeni mod: angle satırlarına göre (pvStorePoint) ---
         if angle_rows:
-            # Tüm noktalar bitmişse uyarı ver
-            if self._scan_angle_index >= len(angle_rows):
-                QMessageBox.information(self, "Bilgi", "Tüm açı noktalarına gidildi.")
+            # 0 veya 1 nokta varsa gezilecek yer yok
+            if len(angle_rows) <= 1:
+                QMessageBox.information(self, "Bilgi",
+                                        "En az 2 açı noktası kaydetmelisiniz.")
                 return
 
-            # Sondan başa doğru gitmek için index'i tersten hesapla
-            idx = len(angle_rows) - 1 - self._scan_angle_index
+            # Son noktaya zaten kendin gelmiş kabul ediyoruz.
+            # Gezilecek gerçek adım sayısı (sondan ilk noktaya kadar) = len - 1
+            max_steps = len(angle_rows) - 1
+
+            # Tüm noktalar gezildiyse
+            if self._scan_angle_index >= max_steps:
+                QMessageBox.information(self, "Bilgi",
+                                        "Tüm açı noktalarına son noktadan ilk noktaya kadar gidildi.")
+                # İstersen burada reset de edebiliriz:
+                # self._scan_angle_index = 0
+                return
+
+            # Sondan → başa giderken ilk hedef:
+            # scan_index = 0 iken idx = (max_steps - 1) = len-2 (yani sondan bir önceki satır)
+            idx = max_steps - 1 - self._scan_angle_index
             row = angle_rows[idx]
 
-            print(f"[NextPoint-angle] step_index={self._scan_angle_index}  idx={idx}  row={row}")
+            print(f"[NextPoint-angle] step_index={self._scan_angle_index}  "
+                  f"idx={idx}  row={row}")
             sys.stdout.flush()
 
             ok = self._goto_angle_row(row, wait_s=0.0)
@@ -1166,11 +1463,9 @@ QGroupBox::title {
               f"(orijinal ileri yönde: yaw={yaw_d[i]:+d}, pitch={pitch_d[i]:+d})")
         sys.stdout.flush()
 
-        # Hareketleri sırayla kuyrukla
         self._move_signed_steps(self.motorX, inv_y)
         self._move_signed_steps(self.motorY, inv_p)
 
-        # Hareket bitene kadar bekle (UI'yi dondurmadan)
         if not self._wait_both_idle(timeout_ms=300000):
             QMessageBox.critical(self, "Tarama Hatası",
                                  f"Segment {i} tamamlanmadan zaman aşımı.")
@@ -1179,8 +1474,8 @@ QGroupBox::title {
         print(f"[MANUAL] segment {i:02d} tamamlandı.")
         sys.stdout.flush()
 
-        # Sonraki buton basışında bir sonraki segmente geç
         self._scan_step_index += 1
+
 
     def on_scan_points_clicked(self):
         """
@@ -1282,6 +1577,7 @@ QGroupBox::title {
             cum_y = 0
             cum_p = 0
             for i in range(total_seg - 1, -1, -1):
+                self._current_log_row = None
                 inv_y = -int(yaw_d[i])    # YAW → motorX (ters işaret)
                 inv_p = -int(pitch_d[i])  # PITCH → motorY (ters işaret)
 
@@ -1405,8 +1701,8 @@ QGroupBox::title {
                 close_port(self.dim_worker.ser); self.dim_worker.ser = None
         self._safe(lambda: self.shared and self.shared.set_enable(False))
         self._safe(lambda: self.ori_worker and self.ori_worker.stop())
+        self._safe(lambda: self._log_file and self._log_file.close())
 
-        # self.ori_worker.wait(...) yok; zaten thread'e wait ettik.
         return super().closeEvent(e)
 
 
