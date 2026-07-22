@@ -1,22 +1,24 @@
-# motor_control.py
-# Step motor sürücüsü (A4988/DRV8825/TMC..) için libgpiod + QThread tabanlı kontrol.
-# - İki katman: SharedPins (EN/RESET/SLEEP/MS* ortak hatlar) + MotorController (tek motor STEP/DIR).
-# - Jog (basılı tut) ve "N adım" hareketi.
-# - Hız ayarı: ms/kenar (HIGH ve LOW ayrı ayrı). Küçük ms ⇒ daha hızlı.
-# - Pi 5 uyumlu, pigpio gerektirmez.
+"""Thread-safe, two-axis friendly stepper motor control.
 
+Only the worker thread touches STEP/DIR GPIO. Calls made by the GUI thread
+append commands to a protected queue, so direction and step count cannot be
+separated by a race.
+"""
+
+import math
 import time
+from collections import deque
 from dataclasses import dataclass
+from threading import Condition, Lock
 from typing import Optional
 
 import gpiod
 from PySide2.QtCore import QObject, QThread, Signal, Slot, QEventLoop, QTimer
 
 
-# -------------------- Yardımcılar --------------------
-
 class _Chip:
-    """gpiochip0 için basit tekil (singleton) tutucu."""
+    """Singleton holder for gpiochip0."""
+
     _chip = None
 
     @classmethod
@@ -27,7 +29,6 @@ class _Chip:
 
 
 def _req_out(pin: Optional[int], default_val: int):
-    """Bir GPIO hattını çıkış olarak talep et. None ise None döner."""
     if pin is None:
         return None
     line = _Chip.get().get_line(pin)
@@ -40,99 +41,95 @@ def _req_out(pin: Optional[int], default_val: int):
 
 
 _MICROSTEP_TABLE = {
-    "FULL":      (0, 0, 0),
-    "HALF":      (1, 0, 0),
-    "QUARTER":   (0, 1, 0),
-    "EIGHTH":    (1, 1, 0),
+    "FULL": (0, 0, 0),
+    "HALF": (1, 0, 0),
+    "QUARTER": (0, 1, 0),
+    "EIGHTH": (1, 1, 0),
     "SIXTEENTH": (1, 1, 1),
 }
 
 
-# -------------------- Ortak Hatlar --------------------
-
 class SharedPins:
-    """
-    EN / RESET / SLEEP / MS1 / MS2 / MS3 gibi ortak hatları tek yerden yönetir.
-    İki (veya daha fazla) motor aynı SharedPins örneğini paylaşır.
-    """
+    """Manage EN/RESET/SLEEP/MS pins shared by both motor drivers."""
+
     def __init__(self, en: int, reset: int, sleep: int, ms1: int, ms2: int, ms3: int):
-        self._en    = _req_out(en,    1)  # A4988: EN=1 devre dışı
-        self._reset = _req_out(reset, 1)  # 1 = normal
-        self._sleep = _req_out(sleep, 1)  # 1 = uyanık
-        self._ms1   = _req_out(ms1,   0)
-        self._ms2   = _req_out(ms2,   0)
-        self._ms3   = _req_out(ms3,   0)
+        self._en = _req_out(en, 1)       # A4988: EN=1 disabled
+        self._reset = _req_out(reset, 1)
+        self._sleep = _req_out(sleep, 1)
+        self._ms1 = _req_out(ms1, 0)
+        self._ms2 = _req_out(ms2, 0)
+        self._ms3 = _req_out(ms3, 0)
 
     def set_enable(self, enabled: bool):
-        """True ⇒ EN=LOW (etkin), False ⇒ EN=HIGH (devre dışı)."""
         self._en.set_value(0 if enabled else 1)
 
     def set_sleep(self, awake: bool):
-        """True ⇒ uyanık (SLEEP=1), False ⇒ uyku (SLEEP=0)."""
         self._sleep.set_value(1 if awake else 0)
 
     def pulse_reset(self):
-        """Reset hattına kısa darbe."""
-        self._reset.set_value(0); time.sleep(0.002)
-        self._reset.set_value(1); time.sleep(0.002)
+        self._reset.set_value(0)
+        time.sleep(0.002)
+        self._reset.set_value(1)
+        time.sleep(0.002)
 
     def set_microstep(self, mode: str):
-        """Mikroadım modunu ayarla (her iki/sistemdeki tüm sürücülere etki eder)."""
         ms = _MICROSTEP_TABLE.get(mode.strip().upper())
-        if not ms:
+        if ms is None:
             return
         self._ms1.set_value(ms[0])
         self._ms2.set_value(ms[1])
         self._ms3.set_value(ms[2])
 
 
-# -------------------- Pin Tanımı --------------------
-
 @dataclass(frozen=True)
 class MotorPins:
-    step: int  # ZORUNLU
-    dir:  int  # ZORUNLU
-    # Aşağıdakiler SharedPins ile ortak yönetildiği için burada None bırakabilirsiniz
-    en:    Optional[int] = None
+    step: int
+    dir: int
+    en: Optional[int] = None
     sleep: Optional[int] = None
     reset: Optional[int] = None
-    ms1:   Optional[int] = None
-    ms2:   Optional[int] = None
-    ms3:   Optional[int] = None
+    ms1: Optional[int] = None
+    ms2: Optional[int] = None
+    ms3: Optional[int] = None
 
-
-# -------------------- Worker (QThread içinde koşar) --------------------
 
 class StepperWorker(QObject):
-    finished     = Signal()
-    progress     = Signal(int)   # toplam atılan adım
-    error        = Signal(str)
-    step         = Signal(int)   # her adımda +1 (ileri/sağa/yukarı), -1 (geriye/sola/aşağı)
-    busyChanged  = Signal(bool)  # YENİ: meşguliyet durumu değiştiğinde
+    finished = Signal()
+    progress = Signal(int)
+    error = Signal(str)
+    step = Signal(int)
+    busyChanged = Signal(bool)
+    moveStarted = Signal(int, int)   # move_id, signed_steps
+    moveFinished = Signal(int, bool)  # move_id, completed; False means cancelled
 
     def __init__(self, pins: MotorPins, shared: Optional[SharedPins] = None, parent=None):
         super().__init__(parent)
-        self.pins   = pins
+        self.pins = pins
         self.shared = shared
-
-        # Sadece STEP/DIR hatlarını talep et (ortak hatlar SharedPins tarafından tutulur)
         self._step_line = _req_out(pins.step, 0)
-        self._dir_line  = _req_out(pins.dir,  0)
+        self._dir_line = _req_out(pins.dir, 0)
 
-        # Durum
-        self._edge_s  = 0.005   # her kenar için süre (s). 5ms ⇒ ~100 adım/sn
+        self._edge_s = 0.005
+        self._start_sps = 50.0
+        self._acceleration_sps2 = 400.0
         self._forward = True
-        self._jog     = False
-        self._nsteps  = 0
-        self._run     = True
-        self._total   = 0
-        self._busy    = False    # YENİ
+        self._jog = False
+        self._jog_forward = True
+        self._jog_steps = 0
+        # [move_id, remaining_steps, total_steps, completed_steps]
+        self._active_move = None
+        self._moves = deque()     # (move_id, signed_steps)
+        self._commands = deque()
+        self._condition = Condition()
+        self._state_lock = Lock()
+        self._run = True
+        self._total = 0
+        self._busy = False
+        self._next_move_id = 1
 
-        # Güvenli başlangıç
         self._apply_dir()
-        self._wake(True)         # uyanık
+        self._wake(True)
 
-    # ---- düşük seviye yardımcılar ----
     def _enable(self, on: bool):
         if self.shared:
             self.shared.set_enable(on)
@@ -145,203 +142,351 @@ class StepperWorker(QObject):
         self._dir_line.set_value(1 if self._forward else 0)
         time.sleep(0.002)
 
-    def _pulse_once(self):
-        """Tek tam adım (HIGH ve LOW kenarları)."""
-        self._step_line.set_value(1); time.sleep(self._edge_s)
-        self._step_line.set_value(0); time.sleep(self._edge_s)
-
-        delta = +1 if self._forward else -1
+    def _pulse_once(self, edge_s: Optional[float] = None):
+        pulse_edge_s = self._edge_s if edge_s is None else max(0.0005, float(edge_s))
+        self._step_line.set_value(1)
+        time.sleep(pulse_edge_s)
+        self._step_line.set_value(0)
+        time.sleep(pulse_edge_s)
+        delta = 1 if self._forward else -1
         self._total += 1
         self.progress.emit(self._total)
         self.step.emit(delta)
 
-    # ---- dış API (slotlar) ----
+    def _profile_edge_s(self, completed: int, remaining: int) -> float:
+        """Trapezoidal/triangular profile expressed as pulse edge duration."""
+        target_sps = 1.0 / (2.0 * self._edge_s)
+        start_sps = min(target_sps, max(1.0, self._start_sps))
+        acceleration = max(1.0, self._acceleration_sps2)
+        accel_sps = math.sqrt(start_sps * start_sps + 2.0 * acceleration * completed)
+        decel_sps = math.sqrt(start_sps * start_sps + 2.0 * acceleration * max(0, remaining - 1))
+        current_sps = max(1.0, min(target_sps, accel_sps, decel_sps))
+        return 1.0 / (2.0 * current_sps)
+
+    def _set_busy(self, busy: bool):
+        busy = bool(busy)
+        with self._state_lock:
+            changed = busy != self._busy
+            self._busy = busy
+        if changed:
+            self.busyChanged.emit(busy)
+
+    def _queue_command(self, name: str, *args):
+        """Queue without touching GPIO from the caller's thread."""
+        with self._condition:
+            self._commands.append((name, args))
+            if name in ("move", "jog_start"):
+                self._set_busy(True)
+            self._condition.notify()
+
+    def submit_move(self, signed_steps: int) -> int:
+        """Atomically queue direction and distance and return a movement id."""
+        signed_steps = int(signed_steps)
+        if signed_steps == 0:
+            return 0
+        with self._condition:
+            move_id = self._next_move_id
+            self._next_move_id += 1
+            self._commands.append(("move", (move_id, signed_steps)))
+            self._set_busy(True)
+            self._condition.notify()
+        return move_id
+
+    def _cancel_moves_in_worker(self):
+        cancelled = []
+        if self._active_move is not None:
+            cancelled.append(self._active_move[0])
+            self._active_move = None
+        while self._moves:
+            cancelled.append(self._moves.popleft()[0])
+
+        # A cancel may arrive just before another producer queues a move.
+        # Commands already ahead of this cancel are handled in order by
+        # _handle_commands; commands queued afterwards remain valid.
+        for move_id in cancelled:
+            self.moveFinished.emit(move_id, False)
+
+    def _handle_commands(self):
+        with self._condition:
+            commands = list(self._commands)
+            self._commands.clear()
+
+        for name, args in commands:
+            if name == "speed":
+                self._edge_s = max(0.0005, float(args[0]) / 1000.0)
+            elif name == "motion_profile":
+                self._start_sps = max(1.0, float(args[0]))
+                self._acceleration_sps2 = max(1.0, float(args[1]))
+            elif name == "microstep":
+                if self.shared:
+                    self.shared.set_microstep(args[0])
+                else:
+                    self.error.emit("SharedPins yok: microstep ortak pinleri yonetilemiyor.")
+            elif name == "move":
+                move_id, signed_steps = int(args[0]), int(args[1])
+                if self._jog:
+                    self.error.emit("Jog aktifken planli hareket reddedildi.")
+                    self.moveFinished.emit(move_id, False)
+                else:
+                    self._moves.append((move_id, signed_steps))
+            elif name == "jog_start":
+                if self._active_move is not None or self._moves:
+                    self.error.emit("Planli hareket aktifken jog reddedildi.")
+                else:
+                    self._jog_forward = bool(args[0])
+                    self._jog_steps = 0
+                    self._jog = True
+                    self._wake(True)
+            elif name == "jog_stop":
+                self._jog = False
+            elif name == "cancel_moves":
+                self._cancel_moves_in_worker()
+            elif name == "emergency_stop":
+                self._jog = False
+                self._cancel_moves_in_worker()
+            elif name == "reset":
+                if self.shared:
+                    self.shared.pulse_reset()
+                else:
+                    self.error.emit("SharedPins yok: reset ortak pini yok.")
+            elif name == "sleep":
+                if self.shared:
+                    self.shared.set_sleep(not bool(args[0]))
+                if args[0]:
+                    self._jog = False
+                    self._cancel_moves_in_worker()
+            elif name == "enable":
+                self._enable(bool(args[0]))
+            elif name == "shutdown":
+                self._jog = False
+                self._cancel_moves_in_worker()
+                self._run = False
+
     @Slot(float)
     def set_speed_ms(self, ms_per_edge: float):
-        """Her kenar süresi (ms). 1.0 ms ⇒ ~500 adım/sn. Küçük ⇒ hızlı."""
-        self._edge_s = max(0.0005, float(ms_per_edge) / 1000.0)
+        self._queue_command("speed", float(ms_per_edge))
 
-    @Slot(bool)
-    def set_direction(self, forward: bool):
-        self._forward = bool(forward)
-        self._apply_dir()
+    def set_motion_profile(self, start_sps: float, acceleration_sps2: float):
+        self._queue_command("motion_profile", float(start_sps), float(acceleration_sps2))
 
     @Slot(str)
     def set_microstep(self, mode: str):
-        if self.shared:
-            self.shared.set_microstep(mode)
-        else:
-            self.error.emit("SharedPins yok: microstep ortak pinleri yönetilemiyor.")
+        self._queue_command("microstep", str(mode))
+
+    def start_jog(self, forward: bool):
+        self._queue_command("jog_start", bool(forward))
 
     @Slot()
-    def start_jog(self):
-        """Sürekli jog (buton basılı tut)."""
-        self._wake(True)
-        self._jog = True
+    def stop_jog(self):
+        self._queue_command("jog_stop")
 
     @Slot()
-    def stop(self):
-        """Jog'u durdurur. EN'i değiştirmez (ortak olduğu için)."""
-        self._jog = False
+    def cancel_moves(self):
+        self._queue_command("cancel_moves")
 
-    @Slot(int)
-    def move_steps(self, n: int):
-        """Tam n adım (asenkron; işçi döngüsünde tüketilir)."""
-        if n <= 0:
-            return
-        self._wake(True)
-        self._nsteps += int(n)
+    @Slot()
+    def emergency_stop(self):
+        self._queue_command("emergency_stop")
+
+    def move_steps(self, signed_steps: int) -> int:
+        return self.submit_move(signed_steps)
 
     @Slot()
     def reset_pulse(self):
-        if self.shared:
-            self.shared.pulse_reset()
-        else:
-            self.error.emit("SharedPins yok: reset ortak pini yok.")
+        self._queue_command("reset")
 
     @Slot(bool)
     def sleep(self, do_sleep: bool):
-        if self.shared:
-            self.shared.set_sleep(not do_sleep)
-        if do_sleep:
-            self._jog = False
+        self._queue_command("sleep", bool(do_sleep))
 
     @Slot(bool)
     def enable(self, on: bool):
-        self._enable(on)
+        self._queue_command("enable", bool(on))
 
-    # ---- thread döngüsü ----
     @Slot()
     def run(self):
         try:
             while self._run:
-                did = False
+                self._handle_commands()
+                if not self._run:
+                    break
 
-                if self._jog:
-                    self._pulse_once()
-                    did = True
+                if self._active_move is None and self._moves:
+                    move_id, signed_steps = self._moves.popleft()
+                    total_steps = abs(signed_steps)
+                    self._active_move = [move_id, total_steps, total_steps, 0]
+                    self._wake(True)
+                    self._forward = signed_steps > 0
+                    self._apply_dir()
+                    self.moveStarted.emit(move_id, signed_steps)
 
-                if self._nsteps > 0:
-                    self._pulse_once()
-                    self._nsteps -= 1
-                    did = True
+                if self._active_move is not None:
+                    edge_s = self._profile_edge_s(
+                        self._active_move[3], self._active_move[1]
+                    )
+                    self._pulse_once(edge_s=edge_s)
+                    self._active_move[1] -= 1
+                    self._active_move[3] += 1
+                    if self._active_move[1] <= 0:
+                        move_id = self._active_move[0]
+                        self._active_move = None
+                        self.moveFinished.emit(move_id, True)
+                elif self._jog:
+                    if self._forward != self._jog_forward:
+                        self._forward = self._jog_forward
+                        self._apply_dir()
+                    target_sps = 1.0 / (2.0 * self._edge_s)
+                    start_sps = min(target_sps, max(1.0, self._start_sps))
+                    jog_sps = min(
+                        target_sps,
+                        math.sqrt(
+                            start_sps * start_sps
+                            + 2.0 * max(1.0, self._acceleration_sps2) * self._jog_steps
+                        ),
+                    )
+                    self._pulse_once(edge_s=1.0 / (2.0 * jog_sps))
+                    self._jog_steps += 1
+                else:
+                    with self._condition:
+                        if not self._commands:
+                            self._condition.wait(timeout=0.05)
 
-                # --- busy state takibi ---
-                new_busy = self._jog or (self._nsteps > 0)
-                if new_busy != self._busy:
-                    self._busy = new_busy
-                    self.busyChanged.emit(self._busy)
-
-                if not did:
-                    time.sleep(0.004)  # boşta CPU'yu yorma
-        except Exception as e:
-            self.error.emit(str(e))
+                # Use the same lock order as producers to avoid a busy-state race.
+                with self._condition:
+                    pending_commands = bool(self._commands)
+                    self._set_busy(bool(
+                        self._jog or self._active_move is not None
+                        or self._moves or pending_commands
+                    ))
+        except Exception as exc:
+            self.error.emit(str(exc))
         finally:
-            # döngüden çıkarken idle'a geçtiğimizi bildir
-            if self._busy:
-                self._busy = False
-                self.busyChanged.emit(False)
+            self._set_busy(False)
             self.finished.emit()
 
-    # dışarıdan güvenli kapatma
     def shutdown_now(self):
-        self._run = False
-        self._jog = False
+        self._queue_command("shutdown")
 
-    # Durum sorgusu (opsiyonel)
     def is_busy(self) -> bool:
-        return self._busy
+        with self._state_lock:
+            return self._busy
 
-
-# -------------------- Yüksek Seviye Sarmalayıcı --------------------
 
 class MotorController(QObject):
-    """
-    Tek motor kontrol sınıfı.
-    - STEP/DIR: bireysel
-    - EN/RESET/SLEEP/MS*: SharedPins üzerinden ortak
-    """
+    """Public controller; all GPIO work is delegated to StepperWorker."""
+
     progress = Signal(int)
-    error    = Signal(str)
+    error = Signal(str)
+    busyChanged = Signal(bool)
+    moveStarted = Signal(int, int)
+    moveFinished = Signal(int, bool)
 
     def __init__(self, pins: MotorPins, shared: Optional[SharedPins] = None, parent=None):
         super().__init__(parent)
         self.worker = StepperWorker(pins, shared=shared)
         self.th = QThread()
         self.worker.moveToThread(self.th)
+        self._requested_forward = True
 
-        # köprü sinyaller
         self.worker.progress.connect(self.progress)
         self.worker.error.connect(self.error)
-
+        self.worker.busyChanged.connect(self.busyChanged)
+        self.worker.moveStarted.connect(self.moveStarted)
+        self.worker.moveFinished.connect(self.moveFinished)
         self.th.started.connect(self.worker.run)
         self.th.start()
 
-    # Dış API (rsdm.py buradan çağırır)
-    def set_speed_ms(self, ms: float):    self.worker.set_speed_ms(ms)
-    def set_direction(self, fwd: bool):   self.worker.set_direction(fwd)
-    def set_microstep(self, mode: str):   self.worker.set_microstep(mode)
-    def start_jog(self):                  self.worker.start_jog()
-    def stop(self):                       self.worker.stop()
-    def move_steps(self, n: int):         self.worker.move_steps(n)
-    def reset_pulse(self):                self.worker.reset_pulse()
-    def sleep(self, do_sleep: bool):      self.worker.sleep(do_sleep)
-    def enable(self, on: bool):           self.worker.enable(on)
+    def set_speed_ms(self, ms: float):
+        self.worker.set_speed_ms(ms)
 
-    # Adım başına callback
-    def set_step_callback(self, cb):
-        """
-        cb(delta:int) -> None
-        delta = +1 (ileri/sağ/yukarı), -1 (geri/sol/aşağı)
-        """
-        self.worker.step.connect(cb)
+    def set_direction(self, forward: bool):
+        """Select direction for the next compatibility move or jog call."""
+        self._requested_forward = bool(forward)
 
-    # Busy/idle izleme
+    def set_microstep(self, mode: str):
+        self.worker.set_microstep(mode)
+
+    def set_motion_profile(self, start_sps: float, acceleration_sps2: float):
+        self.worker.set_motion_profile(start_sps, acceleration_sps2)
+
+    def start_jog(self):
+        self.worker.start_jog(self._requested_forward)
+
+    def stop_jog(self):
+        self.worker.stop_jog()
+
+    def stop(self):
+        """Compatibility alias. It intentionally stops jog only."""
+        self.stop_jog()
+
+    def cancel_moves(self):
+        self.worker.cancel_moves()
+
+    def emergency_stop(self):
+        self.worker.emergency_stop()
+
+    def move_steps(self, n: int) -> int:
+        """Queue positive count using the direction chosen by set_direction."""
+        n = abs(int(n))
+        if n == 0:
+            return 0
+        return self.worker.move_steps(n if self._requested_forward else -n)
+
+    def move_signed_steps(self, signed_steps: int) -> int:
+        """Preferred atomic movement API."""
+        return self.worker.move_steps(int(signed_steps))
+
+    def reset_pulse(self):
+        self.worker.reset_pulse()
+
+    def sleep(self, do_sleep: bool):
+        self.worker.sleep(do_sleep)
+
+    def enable(self, on: bool):
+        self.worker.enable(on)
+
+    def set_step_callback(self, callback):
+        self.worker.step.connect(callback)
+
     def is_busy(self) -> bool:
-        return bool(self.worker.is_busy())
+        return self.worker.is_busy()
 
     def wait_until_idle(self, timeout_ms: int = 8000) -> bool:
-        """
-        Motor boşta (idle) olana dek bekler. True=başarılı, False=timeout.
-        """
         if not self.is_busy():
             return True
 
         loop = QEventLoop()
-        timed_out = {"v": False}
+        timed_out = {"value": False}
 
         def on_busy_changed(busy: bool):
             if not busy and loop.isRunning():
                 loop.quit()
 
-        self.worker.busyChanged.connect(on_busy_changed)
-
+        self.busyChanged.connect(on_busy_changed)
         timer = QTimer()
         timer.setSingleShot(True)
-        timer.timeout.connect(lambda: (timed_out.update(v=True), loop.quit()))
+        timer.timeout.connect(
+            lambda: (timed_out.update(value=True), loop.quit())
+        )
         timer.start(max(1, int(timeout_ms)))
 
-        # Çağrıda idle olduysa hemen çık
         if not self.is_busy():
             try:
-                self.worker.busyChanged.disconnect(on_busy_changed)
+                self.busyChanged.disconnect(on_busy_changed)
             except Exception:
                 pass
             timer.stop()
             return True
 
         loop.exec_()
-
         try:
-            self.worker.busyChanged.disconnect(on_busy_changed)
+            self.busyChanged.disconnect(on_busy_changed)
         except Exception:
             pass
         timer.stop()
-
-        return not timed_out["v"]
+        return not timed_out["value"] and not self.is_busy()
 
     def shutdown(self):
-        """Thread'i düzgün kapat."""
         self.worker.shutdown_now()
         self.th.quit()
         self.th.wait()

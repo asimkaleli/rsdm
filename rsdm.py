@@ -59,6 +59,11 @@ class rsdm(QWidget):
     MICROSTEP_DIV_Y = 16
     GEAR_RATIO_Y = 10
 
+    # Motion profile. The combo box remains the target speed; motors ramp from
+    # this start speed using the configured acceleration.
+    MOTOR_START_SPS = 50.0
+    MOTOR_ACCELERATION_SPS2 = 400.0
+
     def __init__(self):
         super(rsdm, self).__init__()
 
@@ -139,6 +144,8 @@ QGroupBox::title {
             # 2) Motorlar
             self.motorX = MotorController(MotorPins(step=12, dir=5), shared=self.shared)  # Yaw ~ sağ/sol
             self.motorY = MotorController(MotorPins(step=13, dir=6), shared=self.shared)  # Pitch ~ yukarı/aşağı
+            self.motorX.set_motion_profile(self.MOTOR_START_SPS, self.MOTOR_ACCELERATION_SPS2)
+            self.motorY.set_motion_profile(self.MOTOR_START_SPS, self.MOTOR_ACCELERATION_SPS2)
 
             # Adım sayaç/durum (seçim aralığını ölçmek için)
             self._track_steps = False
@@ -1503,8 +1510,8 @@ QGroupBox::title {
 
             # Başlamadan önce kuyruk temizle
             try:
-                self.motorX.stop()
-                self.motorY.stop()
+                self.motorX.emergency_stop()
+                self.motorY.emergency_stop()
             except Exception:
                 pass
             for _ in range(3):
@@ -1550,8 +1557,8 @@ QGroupBox::title {
             # --- BAŞLAMADAN ÖNCE: olası kuyrukları temizle ---
             # (stop() genelde kuyruğu iptal eder; motor_control tarafında flush varsa onu çağır.)
             try:
-                self.motorX.stop()
-                self.motorY.stop()
+                self.motorX.emergency_stop()
+                self.motorY.emergency_stop()
             except Exception:
                 pass
             # kısa arm
@@ -1618,8 +1625,7 @@ QGroupBox::title {
         steps = int(steps)
         if steps == 0 or motor is None:
             return
-        motor.set_direction(steps > 0)
-        motor.move_steps(abs(steps))
+        motor.move_signed_steps(steps)
 
     def _wait_seconds(self, seconds: float):
         """UI’yi dondurmadan bekle."""
