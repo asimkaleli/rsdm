@@ -37,7 +37,9 @@ from orientation import OrientationWorker
 from motor_control import MotorController, MotorPins, SharedPins
 
 # Yalnızca planlayıcıyı kullanacağız (fallback yok)
-from laser_path_planner import plan_laser_path, StepperConfig
+from laser_path_planner import (
+    plan_grid_path, plan_laser_path, planned_move_steps, StepperConfig,
+)
 
 from datetime import datetime
 
@@ -131,11 +133,12 @@ QGroupBox::title {
         self._awaiting_marker_click = False
         self._last_store_row = None
 
-        self._current_point_kind = None  # "stored_angle" | "sequential"
+        self._current_point_kind = None  # "stored_angle" | "sequential" | "grid"
         self._current_point_row = None
         self._programmatic_motion_active = False
         self._scan_sequence_active = False
         self._scan_cancel_requested = False
+        self._area_corners = {}
 
         # --- Motorlar ve lazer ---
         try:
@@ -205,8 +208,7 @@ QGroupBox::title {
         # Hangi satırda beklerken zaman serisi loglanacağını tut
         self._current_log_row = None
         self._last_log_row = None
-        # Sequential tabloda X/Y piksel değerleri bulunduğundan, CSV için
-        # planner'ın hesapladığı hedef açıları ayrıca taşıyoruz.
+        # Planlı hedeflerde CSV için planner'ın hesapladığı açıları ayrıca taşıyoruz.
         self._current_log_pitch = None
         self._current_log_yaw = None
 
@@ -249,6 +251,16 @@ QGroupBox::title {
         self.ui.btnSeqCreate = self.w(QPushButton, "seqCreatePb")
         self.ui.pbNextPoint = self.w(QPushButton, "pbNextPoint")
         self.ui.countSpin = self.w(QSpinBox, "seqCntSb")
+
+        # Dört köşeli alan taraması
+        self.ui.areaSelectA = self.w(QPushButton, "areaSelectAPb")
+        self.ui.areaSelectB = self.w(QPushButton, "areaSelectBPb")
+        self.ui.areaSelectC = self.w(QPushButton, "areaSelectCPb")
+        self.ui.areaSelectD = self.w(QPushButton, "areaSelectDPb")
+        self.ui.areaXDiv = self.w(QSpinBox, "areaXDivSb")
+        self.ui.areaYDiv = self.w(QSpinBox, "areaYDivSb")
+        self.ui.areaTotalLabel = self.w(QLabel, "areaTotalLabel")
+        self.ui.areaCreate = self.w(QPushButton, "areaCreatePb")
 
         # Yön tuşları (senin UI eşleşmene göre)
         self.ui.btnDown = self.w(QPushButton, "btnDown")
@@ -305,11 +317,20 @@ QGroupBox::title {
     def connect_signals(self):
         # Label tıklama
         self.label.clicked.connect(self.on_label_clicked)
+        self.label.selectionCompleted.connect(self.on_selection_completed)
         # Sıralı seçim
         self.ui.btnSeqFirst.clicked.connect(self.on_select_first_clicked)
         self.ui.btnSeqLast.clicked.connect(self.on_select_last_clicked)
         self.ui.btnSeqCreate.clicked.connect(self.on_clicked_create_btn)
         self.ui.pbNextPoint.clicked.connect(self.on_clicked_next_point_btn)
+        self.ui.areaSelectA.clicked.connect(lambda: self.on_area_select_clicked("A"))
+        self.ui.areaSelectB.clicked.connect(lambda: self.on_area_select_clicked("B"))
+        self.ui.areaSelectC.clicked.connect(lambda: self.on_area_select_clicked("C"))
+        self.ui.areaSelectD.clicked.connect(lambda: self.on_area_select_clicked("D"))
+        self.ui.areaXDiv.valueChanged.connect(self._update_area_total)
+        self.ui.areaYDiv.valueChanged.connect(self._update_area_total)
+        self.ui.areaCreate.clicked.connect(self.on_create_area_points)
+        self._update_area_total()
 
         # Tablo-sil senkronu
         self.ui.table.model().rowsRemoved.connect(self.on_rows_removed)
@@ -960,6 +981,7 @@ QGroupBox::title {
     def on_select_first_clicked(self):
         if self._scan_sequence_active:
             return
+        self._reset_area_selection()
         self.label.start_select_first()
         self._reset_step_counters()
         self._track_steps = True
@@ -975,36 +997,270 @@ QGroupBox::title {
         # O anki D'yi yakala
         self._last_distance_at_select = self._last_distance
 
+    # ---------- Dört köşeli alan seçimi ----------
+    def _update_area_total(self, *_):
+        total = (int(self.ui.areaXDiv.value()) + 1) * (
+            int(self.ui.areaYDiv.value()) + 1
+        )
+        self.ui.areaTotalLabel.setText(f"Generated Points: {total}")
+
+    def _area_button(self, corner: str):
+        return {
+            "A": self.ui.areaSelectA,
+            "B": self.ui.areaSelectB,
+            "C": self.ui.areaSelectC,
+            "D": self.ui.areaSelectD,
+        }[corner]
+
+    def _reset_area_selection(self):
+        self._area_corners.clear()
+        self.label.area_points.clear()
+        labels = {
+            "A": "A - Top Left",
+            "B": "B - Top Right",
+            "C": "C - Bottom Right",
+            "D": "D - Bottom Left",
+        }
+        for corner, text in labels.items():
+            self._area_button(corner).setText(text)
+        self.label.update()
+
+    def on_area_select_clicked(self, corner: str):
+        """Arm one corner selection; capture happens on the camera click."""
+        if self._scan_sequence_active or self._programmatic_motion_active:
+            return
+        if not self.label.pixmap():
+            QMessageBox.warning(self, "Area Scan", "Kamera görüntüsü hazır değil.")
+            return
+        if self.motorX.is_busy() or self.motorY.is_busy():
+            QMessageBox.warning(self, "Area Scan", "Köşeyi seçmeden önce motorun durmasını bekleyin.")
+            return
+        if self._last_distance is None:
+            QMessageBox.warning(self, "Area Scan", "Bu köşe için geçerli mesafe ölçümü yok.")
+            return
+        self._track_steps = False
+        self.label.first_point = None
+        self.label.last_point = None
+        self.label.start_select_area(corner)
+
+    def on_selection_completed(self, mode: str, x: int, y: int):
+        if not mode.startswith("area:"):
+            return
+        corner = mode.split(":", 1)[1]
+        if self._last_distance is None:
+            self.label.area_points.pop(corner, None)
+            self.label.update()
+            QMessageBox.warning(self, "Area Scan", "Köşe kaydedilemedi: mesafe ölçümü yok.")
+            return
+        if self.motorX.is_busy() or self.motorY.is_busy():
+            self.label.area_points.pop(corner, None)
+            self.label.update()
+            QMessageBox.warning(self, "Area Scan", "Köşe kaydedilemedi: motor hareket ediyor.")
+            return
+
+        self._area_corners[corner] = {
+            "pixel": (int(x), int(y)),
+            "steps_x": int(self._steps_x_abs),
+            "steps_y": int(self._steps_y_abs),
+            "distance": float(self._last_distance),
+            "unit": self._last_distance_unit or "",
+        }
+        self._area_button(corner).setText(f"{corner} Selected")
+        self._planner_result = None
+        self._mark_position_unknown()
+
+    @staticmethod
+    def _area_pixel_geometry_valid(corners) -> bool:
+        points = [corners[name]["pixel"] for name in ("A", "B", "C", "D")]
+        if len(set(points)) != 4:
+            return False
+
+        def orientation(p, q, r):
+            value = (q[0] - p[0]) * (r[1] - p[1]) - (
+                q[1] - p[1]
+            ) * (r[0] - p[0])
+            return 1 if value > 0 else -1 if value < 0 else 0
+
+        def crosses(p1, p2, q1, q2):
+            return (orientation(p1, p2, q1) * orientation(p1, p2, q2) < 0
+                    and orientation(q1, q2, p1) * orientation(q1, q2, p2) < 0)
+
+        if crosses(points[0], points[1], points[2], points[3]):
+            return False
+        if crosses(points[1], points[2], points[3], points[0]):
+            return False
+        twice_area = 0
+        for current, following in zip(points, points[1:] + points[:1]):
+            twice_area += current[0] * following[1] - following[0] * current[1]
+        return abs(twice_area) >= 20
+
+    def on_create_area_points(self):
+        """Build a D-origin serpentine grid and publish it to the common planner."""
+        if self._scan_sequence_active or self._programmatic_motion_active:
+            return
+        self._scan_cancel_requested = False
+        missing = [name for name in ("A", "B", "C", "D")
+                   if name not in self._area_corners]
+        if missing:
+            QMessageBox.warning(
+                self, "Area Scan", "Eksik köşeler: " + ", ".join(missing)
+            )
+            return
+        total_points = (int(self.ui.areaXDiv.value()) + 1) * (
+            int(self.ui.areaYDiv.value()) + 1
+        )
+        if total_points > 2500:
+            QMessageBox.warning(
+                self, "Area Scan",
+                "En fazla 2500 alan noktası oluşturulabilir. X/Y bölme sayılarını azaltın.",
+            )
+            return
+        if not self._area_pixel_geometry_valid(self._area_corners):
+            QMessageBox.warning(
+                self, "Area Scan",
+                "Köşe işaretleri farklı ve A-B-C-D sırasında geçerli bir alan oluşturmalıdır.",
+            )
+            return
+
+        units = {data["unit"] for data in self._area_corners.values() if data["unit"]}
+        if len(units) > 1:
+            QMessageBox.warning(self, "Area Scan", "Köşe mesafelerinin birimleri aynı değil.")
+            return
+
+        # Normal seçim A→B→C→D şeklindedir ve tarama D'den başlar.
+        # D seçildikten sonra manuel hareket olduysa fiziksel başlangıç bilinmez.
+        d_corner = self._area_corners["D"]
+        if (int(self._steps_x_abs) != d_corner["steps_x"]
+                or int(self._steps_y_abs) != d_corner["steps_y"]):
+            QMessageBox.warning(
+                self, "Area Scan",
+                "Tarama D köşesinden başlar. Motoru D noktasına getirip D köşesini yeniden seçin.",
+            )
+            return
+
+        deg_per_step_x = (float(self.STEP_ANGLE_DEG_X)
+                          / float(self.MICROSTEP_DIV_X)
+                          / float(self.GEAR_RATIO_X))
+        deg_per_step_y = (float(self.STEP_ANGLE_DEG_Y)
+                          / float(self.MICROSTEP_DIV_Y)
+                          / float(self.GEAR_RATIO_Y))
+        a_corner = self._area_corners["A"]
+        corner_dpy = {}
+        for name in ("A", "B", "C", "D"):
+            data = self._area_corners[name]
+            yaw = (data["steps_x"] - a_corner["steps_x"]) * deg_per_step_x
+            pitch = (data["steps_y"] - a_corner["steps_y"]) * deg_per_step_y
+            corner_dpy[name] = (data["distance"], pitch, yaw)
+
+        cfg_x = StepperConfig(
+            step_angle_deg=float(self.STEP_ANGLE_DEG_X),
+            microstep_div=int(self.MICROSTEP_DIV_X),
+            gear_ratio=float(self.GEAR_RATIO_X),
+        )
+        cfg_y = StepperConfig(
+            step_angle_deg=float(self.STEP_ANGLE_DEG_Y),
+            microstep_div=int(self.MICROSTEP_DIV_Y),
+            gear_ratio=float(self.GEAR_RATIO_Y),
+        )
+        try:
+            result = plan_grid_path(
+                corners=corner_dpy,
+                x_segments=int(self.ui.areaXDiv.value()),
+                y_segments=int(self.ui.areaYDiv.value()),
+                stepper_pitch=cfg_y,
+                stepper_yaw=cfg_x,
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Area Scan", f"Alan planı oluşturulamadı: {exc}")
+            return
+
+        dpy = list(result.get("dpy", []))
+        grid_indices = list(result.get("grid_indices", []))
+        if not dpy or len(dpy) != len(grid_indices):
+            QMessageBox.critical(self, "Area Scan", "Alan planı hedef listesi geçersiz.")
+            return
+
+        self.table.setRowCount(0)
+        self.label.markers.clear()
+        pixels = {name: self._area_corners[name]["pixel"]
+                  for name in ("A", "B", "C", "D")}
+        x_segments = int(self.ui.areaXDiv.value())
+        y_segments = int(self.ui.areaYDiv.value())
+
+        for row, ((_, pitch, yaw), (ix, iy)) in enumerate(zip(dpy, grid_indices)):
+            pitch_item = QTableWidgetItem(f"{pitch:.4f}")
+            yaw_item = QTableWidgetItem(f"{yaw:.4f}")
+            pitch_item.setData(Qt.UserRole, "grid")
+            yaw_item.setData(Qt.UserRole, "grid")
+            self.table.insertRow(row)
+            self.table.setItem(row, 0, pitch_item)
+            self.table.setItem(row, 1, yaw_item)
+            btn = self._make_delete_btn(framed=True)
+            cell_widget = QWidget()
+            layout = QHBoxLayout(cell_widget)
+            layout.addWidget(btn)
+            layout.setAlignment(Qt.AlignCenter)
+            layout.setContentsMargins(0, 0, 0, 0)
+            self.table.setCellWidget(row, 2, cell_widget)
+            btn.clicked.connect(self.delete_row_by_button)
+
+            u = ix / float(x_segments)
+            v = iy / float(y_segments)
+            bottom_x = pixels["D"][0] + u * (pixels["C"][0] - pixels["D"][0])
+            bottom_y = pixels["D"][1] + u * (pixels["C"][1] - pixels["D"][1])
+            top_x = pixels["A"][0] + u * (pixels["B"][0] - pixels["A"][0])
+            top_y = pixels["A"][1] + u * (pixels["B"][1] - pixels["A"][1])
+            marker_x = int(round(bottom_x + v * (top_x - bottom_x)))
+            marker_y = int(round(bottom_y + v * (top_y - bottom_y)))
+            self.label.add_marker(row, marker_x, marker_y)
+
+        self.label.area_points.clear()
+        self.label.first_point = None
+        self.label.last_point = None
+        self.label.update()
+        self._planner_result = result
+        self._set_current_point("grid", 0)
+        _, pitch, yaw = dpy[0]
+        self._set_log_target(0, pitch, yaw)
+        QMessageBox.information(
+            self, "Area Scan",
+            f"{len(dpy)} alan noktası oluşturuldu. Tarama D köşesinden başlayacak.",
+        )
+
     def _on_motorX_step(self, delta: int):
         """
         MotorX (Yaw) için step callback.
         delta işaretine göre mutlak step sayacını ve (gerekirse) seçim sayaçlarını günceller.
         """
-        step = 1 if delta >= 0 else -1
-        self._steps_x_abs += step
+        steps = int(delta)
+        if steps == 0:
+            return
+        self._steps_x_abs += steps
 
         if not self._track_steps:
             return
 
-        if step > 0:
-            self._sx_right += 1
+        if steps > 0:
+            self._sx_right += steps
         else:
-            self._sx_left += 1
+            self._sx_left += -steps
 
     def _on_motorY_step(self, delta: int):
         """
         MotorY (Pitch) için step callback.
         """
-        step = 1 if delta >= 0 else -1
-        self._steps_y_abs += step
+        steps = int(delta)
+        if steps == 0:
+            return
+        self._steps_y_abs += steps
 
         if not self._track_steps:
             return
 
-        if step > 0:
-            self._sy_up += 1
+        if steps > 0:
+            self._sy_up += steps
         else:
-            self._sy_down += 1
+            self._sy_down += -steps
 
     def _on_motor_timing(self, axis: str, count: int,
                          mean_period_ms: float, max_jitter_ms: float):
@@ -1186,8 +1442,8 @@ QGroupBox::title {
         if self.motorX.is_busy() or self.motorY.is_busy():
             return  # motor hareketliyken loglama
 
-        # Sequential hedeflerde tablo piksel X/Y tutar; bu durumda planner
-        # hedefleri kullanılır. Store Point satırlarında override None kalır
+        # Planlı hedeflerde planner açıları kullanılır. Store Point
+        # satırlarında override None kalır
         # ve değerler doğrudan tablodan okunur.
         pitch = self._current_log_pitch
         yaw = self._current_log_yaw
@@ -1431,7 +1687,7 @@ QGroupBox::title {
         )
 
     def on_clicked_next_point_btn(self):
-        """Bilinen mevcut hedeften bir önceki hedefe (Last → First) git."""
+        """Aktif planın tarama yönündeki bir sonraki bilinen hedefe git."""
         if self._scan_sequence_active:
             return
         self._scan_cancel_requested = False
@@ -1467,70 +1723,78 @@ QGroupBox::title {
             return
 
         if not self._planner_result:
-            QMessageBox.warning(self, "Plan yok",
-                                "Önce Select First/Last → Create Points ile plan oluşturun.")
+            QMessageBox.warning(
+                self, "Plan yok",
+                "Önce Sequential veya Area Scan noktalarını oluşturun.",
+            )
             return
 
         pitch_d = list(self._planner_result.get("pitch_steps_delta", []))
-        yaw_d   = list(self._planner_result.get("yaw_steps_delta",   []))
+        yaw_d = list(self._planner_result.get("yaw_steps_delta", []))
         dpy = list(self._planner_result.get("dpy", []))
+        plan_type = str(self._planner_result.get("plan_type", "sequential"))
+        scan_step = int(self._planner_result.get("scan_step", -1))
+        if scan_step not in (-1, 1):
+            QMessageBox.critical(self, "Hata", "Planner tarama yönü geçersiz.")
+            return
         if not pitch_d or not yaw_d or len(pitch_d) != len(yaw_d):
             QMessageBox.critical(self, "Hata", "Planner step delta boyutları uyumsuz.")
             return
 
         total_seg = len(pitch_d)
-        if total_seg == 0:
-            QMessageBox.information(self, "Bilgi", "Hiç segment yok.")
-            return
         if len(dpy) != total_seg + 1:
             QMessageBox.critical(self, "Hata", "Planner hedef açı listesi uyumsuz.")
             return
 
-        if (self._current_point_kind != "sequential"
+        if (self._current_point_kind != plan_type
                 or not isinstance(self._current_point_row, int)
                 or not 0 <= self._current_point_row <= total_seg):
             QMessageBox.warning(
                 self, "Konum Bilinmiyor",
-                "Motor bilinen bir Sequential hedefinde değil. "
-                "First/Last noktalarını yeniden seçip Create Points çalıştırın.",
+                "Motor bu planın bilinen bir hedefinde değil. Noktaları yeniden oluşturun.",
             )
             return
-        if self._current_point_row == 0:
-            QMessageBox.information(self, "Bilgi", "İlk sequential noktasındasınız.")
+
+        end_row = 0 if scan_step < 0 else total_seg
+        if self._current_point_row == end_row:
+            QMessageBox.information(self, "Bilgi", "Planın son tarama noktasındasınız.")
             return
 
-        i = self._current_point_row - 1
+        current_row = self._current_point_row
+        target_row = current_row + scan_step
+        move_yaw, move_pitch, segment = planned_move_steps(
+            pitch_d, yaw_d, current_row, target_row
+        )
 
-        inv_y = -int(yaw_d[i])    # YAW → motorX (ters işaret)
-        inv_p = -int(pitch_d[i])  # PITCH → motorY (ters işaret)
-
-        print(f"[MANUAL seg {i:02d}] apply  dYaw_steps={inv_y:+d}  dPitch_steps={inv_p:+d} "
-              f"(orijinal ileri yönde: yaw={yaw_d[i]:+d}, pitch={pitch_d[i]:+d})")
+        print(
+            f"[NextPoint-{plan_type}] {current_row}→{target_row} "
+            f"dYaw_steps={move_yaw:+d} dPitch_steps={move_pitch:+d}"
+        )
         sys.stdout.flush()
 
         self._clear_log_target()
-        if not self._move_both_signed_and_wait(inv_y, inv_p, timeout_ms=300000):
+        if not self._move_both_signed_and_wait(
+            move_yaw, move_pitch, timeout_ms=300000
+        ):
             self._mark_position_unknown()
             if not self._scan_cancel_requested:
-                QMessageBox.critical(self, "Tarama Hatası",
-                                     f"Segment {i} hareketi tamamlanamadı.")
+                QMessageBox.critical(
+                    self, "Tarama Hatası", f"Segment {segment} tamamlanamadı."
+                )
             return
 
-        print(f"[MANUAL] segment {i:02d} tamamlandı.")
-        sys.stdout.flush()
-
-        _, target_pitch, target_yaw = dpy[i]
-        self._set_log_target(i, target_pitch, target_yaw)
-        self._set_current_point("sequential", i)
+        _, target_pitch, target_yaw = dpy[target_row]
+        self._set_log_target(target_row, target_pitch, target_yaw)
+        self._set_current_point(plan_type, target_row)
 
 
     def on_scan_points_clicked(self):
         """
-        İKİ MOD:
+        ÜÇ MOD:
         1) Eğer tabloda pvStorePoint ile kaydedilmiş 'angle' satırları varsa:
            - Bunların tamamına sırayla gider (row0 → row1 → ...).
-        2) Eğer hiç angle satırı yoksa:
-           - Eski davranış: planner_result içindeki step deltalarına göre otomatik scan.
+        2) Sequential planner sonucunu Last→First tarar.
+        3) Area planner sonucunu D'den başlayarak serpantin sırada tarar.
         """
         if self._scan_sequence_active:
             return
@@ -1587,8 +1851,10 @@ QGroupBox::title {
             return
 
         if not self._planner_result:
-            QMessageBox.warning(self, "Plan yok",
-                                "Önce Select First/Last → Create Points ile plan oluştur.")
+            QMessageBox.warning(
+                self, "Plan yok",
+                "Önce Sequential veya Area Scan noktalarını oluşturun.",
+            )
             return
 
         # Bekleme süresi (s)
@@ -1601,8 +1867,12 @@ QGroupBox::title {
 
         try:
             pitch_d = list(self._planner_result.get("pitch_steps_delta", []))
-            yaw_d   = list(self._planner_result.get("yaw_steps_delta",   []))
+            yaw_d = list(self._planner_result.get("yaw_steps_delta", []))
             dpy = list(self._planner_result.get("dpy", []))
+            plan_type = str(self._planner_result.get("plan_type", "sequential"))
+            scan_step = int(self._planner_result.get("scan_step", -1))
+            if scan_step not in (-1, 1):
+                raise RuntimeError("Planner tarama yönü geçersiz.")
             if not pitch_d or not yaw_d or len(pitch_d) != len(yaw_d):
                 raise RuntimeError("Planner step delta boyutları uyumsuz.")
 
@@ -1610,20 +1880,22 @@ QGroupBox::title {
             if len(dpy) != total_seg + 1:
                 raise RuntimeError("Planner hedef açı listesi uyumsuz.")
 
-            if (self._current_point_kind != "sequential"
+            if (self._current_point_kind != plan_type
                     or not isinstance(self._current_point_row, int)
                     or not 0 <= self._current_point_row <= total_seg):
                 raise RuntimeError(
-                    "Motor bilinen bir Sequential hedefinde değil. "
-                    "First/Last seçimini ve Create Points işlemini yenileyin."
+                    "Motor bu planın bilinen bir hedefinde değil. "
+                    "Plan noktalarını yeniden oluşturun."
                 )
             if self.motorX.is_busy() or self.motorY.is_busy():
                 raise RuntimeError("Motor hareketi devam ediyor.")
             start_row = self._current_point_row
+            end_row = 0 if scan_step < 0 else total_seg
             self._scan_sequence_active = True
 
-            print("\n=== TARAMA BAŞLIYOR (SON → İLK) ===")
-            print(f"Kalan segment sayısı: {start_row}")
+            direction_text = "Last→First" if scan_step < 0 else "D→Serpentine End"
+            print(f"\n=== {plan_type.upper()} TARAMA BAŞLIYOR ({direction_text}) ===")
+            print(f"Başlangıç satırı: {start_row}, bitiş satırı: {end_row}")
             print(f"İlk hareketten önce bekleme (idle + {wait_s:.3f}s): {wait_s:.3f} s")
             sys.stdout.flush()
 
@@ -1641,37 +1913,41 @@ QGroupBox::title {
                     self._clear_log_target()
                     return
 
-            # 1) Planner ileri yönde 0→N segmentleri veriyor.
-            #    Biz SON→İLK gideceğimiz için ters sırada ve ters işaretle uygula:
             cum_y = 0
             cum_p = 0
-            for i in range(start_row - 1, -1, -1):
-                self._clear_log_target()
-                inv_y = -int(yaw_d[i])    # YAW → motorX (ters işaret)
-                inv_p = -int(pitch_d[i])  # PITCH → motorY (ters işaret)
+            current_row = start_row
+            while current_row != end_row:
+                target_row = current_row + scan_step
+                move_yaw, move_pitch, segment = planned_move_steps(
+                    pitch_d, yaw_d, current_row, target_row
+                )
 
-                print(f"[rev seg {i:02d}] apply  dYaw_steps={inv_y:+d}  dPitch_steps={inv_p:+d} "
-                      f"(orijinal ileri yönde: yaw={yaw_d[i]:+d}, pitch={pitch_d[i]:+d})")
+                self._clear_log_target()
+                print(
+                    f"[seg {segment:02d}] {current_row}→{target_row} "
+                    f"dYaw_steps={move_yaw:+d} dPitch_steps={move_pitch:+d}"
+                )
                 sys.stdout.flush()
 
                 if not self._move_both_signed_and_wait(
-                    inv_y, inv_p, timeout_ms=300000
+                    move_yaw, move_pitch, timeout_ms=300000
                 ):
                     if self._scan_cancel_requested:
                         self._scan_sequence_active = False
                         self._clear_log_target()
                         return
-                    raise RuntimeError(f"Segment {i} hareketi tamamlanamadı.")
+                    raise RuntimeError(f"Segment {segment} hareketi tamamlanamadı.")
 
-                cum_y += inv_y
-                cum_p += inv_p
+                cum_y += move_yaw
+                cum_p += move_pitch
                 print(f"            cumulative  yaw={cum_y:+d}  pitch={cum_p:+d}")
                 print("            [idle] iki motor da idle.")
                 sys.stdout.flush()
 
-                _, target_pitch, target_yaw = dpy[i]
-                self._set_log_target(i, target_pitch, target_yaw)
-                self._set_current_point("sequential", i)
+                current_row = target_row
+                _, target_pitch, target_yaw = dpy[current_row]
+                self._set_log_target(current_row, target_pitch, target_yaw)
+                self._set_current_point(plan_type, current_row)
 
                 # Segmentler arası bekleme, sadece idle olduktan sonra başlar
                 if wait_s > 0:
@@ -1684,7 +1960,7 @@ QGroupBox::title {
 
             self._clear_log_target()
             self._scan_sequence_active = False
-            print("=== TARAMA BİTTİ ===\n")
+            print(f"=== {plan_type.upper()} TARAMA BİTTİ ===\n")
             sys.stdout.flush()
             QMessageBox.information(self, "Scanning", "Scanning is complete.")
 

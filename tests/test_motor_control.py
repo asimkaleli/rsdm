@@ -137,7 +137,9 @@ class StepperWorkerTests(unittest.TestCase):
         reverse_id = self.worker.submit_move(-3)
 
         self.assertTrue(done.wait(2))
-        self.assertEqual(steps, [1] * 5 + [-1] * 3)
+        self.assertEqual(sum(steps), 2)
+        self.assertEqual(sum(step for step in steps if step > 0), 5)
+        self.assertEqual(sum(step for step in steps if step < 0), -3)
         self.assertEqual(finished, [(forward_id, True), (reverse_id, True)])
         self.assertEqual([report[0] for report in timing_reports], [4, 2])
         self.assertTrue(all(report[1] > 0 for report in timing_reports))
@@ -164,7 +166,7 @@ class StepperWorkerTests(unittest.TestCase):
 
         self.assertTrue(done.wait(1))
         self.assertEqual(result, [(move_id, False)])
-        self.assertLess(len(steps), 500)
+        self.assertLess(sum(abs(step) for step in steps), 500)
 
     def test_emergency_stop_cancels_active_and_queued_moves(self):
         results = []
@@ -236,6 +238,31 @@ class StepperWorkerTests(unittest.TestCase):
         self.assertAlmostEqual(sleep_deadlines[0], 0.001, places=6)
         self.assertAlmostEqual(sleep_deadlines[1], 0.0008, places=6)
         self.assertAlmostEqual(clock["now"], 10.0022, places=6)
+
+    def test_step_updates_are_batched_without_losing_position(self):
+        worker = motor_control.StepperWorker(
+            motor_control.MotorPins(step=15, dir=8)
+        )
+        updates = []
+        worker.step.connect(updates.append)
+        worker._forward = True
+        clock = {"now": 10.0}
+
+        def monotonic():
+            return clock["now"]
+
+        def sleep(seconds):
+            clock["now"] += seconds
+
+        worker._last_step_emit_s = clock["now"]
+        with patch.object(motor_control.time, "monotonic", side_effect=monotonic), \
+             patch.object(motor_control.time, "sleep", side_effect=sleep):
+            for _ in range(16):
+                worker._pulse_once(edge_s=0.0005)
+            worker._emit_step_update(force=True)
+
+        self.assertEqual(updates, [8, 8])
+        self.assertEqual(sum(updates), 16)
 
 
 if __name__ == "__main__":

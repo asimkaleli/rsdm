@@ -133,6 +133,10 @@ class StepperWorker(QObject):
         self._timing_max_jitter_s = 0.0
         self._timing_last_start = None
         self._timing_last_expected_period_s = None
+        self._pending_step_delta = 0
+        self._last_step_emit_s = 0.0
+        self._step_emit_batch = 8
+        self._step_emit_interval_s = 0.020
 
         self._apply_dir()
         self._wake(True)
@@ -172,9 +176,23 @@ class StepperWorker(QObject):
         self._step_line.set_value(0)
         delta = 1 if self._forward else -1
         self._total += 1
+        self._pending_step_delta += delta
+        self._emit_step_update()
+        self._sleep_until(pulse_start + 2.0 * pulse_edge_s)
+
+    def _emit_step_update(self, force: bool = False):
+        """Publish exact position deltas without flooding the Qt event queue."""
+        if self._pending_step_delta == 0:
+            return
+        now = time.monotonic()
+        due = now - self._last_step_emit_s >= self._step_emit_interval_s
+        if not (force or due or abs(self._pending_step_delta) >= self._step_emit_batch):
+            return
+        delta = self._pending_step_delta
+        self._pending_step_delta = 0
+        self._last_step_emit_s = now
         self.progress.emit(self._total)
         self.step.emit(delta)
-        self._sleep_until(pulse_start + 2.0 * pulse_edge_s)
 
     def _reset_timing(self):
         self._timing_count = 0
@@ -249,6 +267,7 @@ class StepperWorker(QObject):
         if self._active_move is not None:
             cancelled.append(self._active_move[0])
             self._active_move = None
+            self._emit_step_update(force=True)
             self._emit_timing_report()
         while self._moves:
             cancelled.append(self._moves.popleft()[0])
@@ -293,12 +312,14 @@ class StepperWorker(QObject):
                     self._wake(True)
             elif name == "jog_stop":
                 if self._jog:
+                    self._emit_step_update(force=True)
                     self._emit_timing_report()
                 self._jog = False
             elif name == "cancel_moves":
                 self._cancel_moves_in_worker()
             elif name == "emergency_stop":
                 if self._jog:
+                    self._emit_step_update(force=True)
                     self._emit_timing_report()
                 self._jog = False
                 self._cancel_moves_in_worker()
@@ -318,6 +339,7 @@ class StepperWorker(QObject):
             elif name == "shutdown":
                 self._jog = False
                 self._cancel_moves_in_worker()
+                self._emit_step_update(force=True)
                 self._run = False
 
     @Slot(float)
@@ -389,6 +411,7 @@ class StepperWorker(QObject):
                     if self._active_move[1] <= 0:
                         move_id = self._active_move[0]
                         self._active_move = None
+                        self._emit_step_update(force=True)
                         self._emit_timing_report()
                         self.moveFinished.emit(move_id, True)
                 elif self._jog:
