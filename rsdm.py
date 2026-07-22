@@ -1130,14 +1130,24 @@ QGroupBox::title {
             QMessageBox.information(self, "Log", "Loglama zaten açık.")
             return
 
+        # Bazı Raspberry Pi masaüstü/portal kombinasyonlarında native dialog
+        # görünmesine rağmen klasör ve dosya adı alanları etkileşim almıyor.
+        # Qt'nin kendi dialog'u bu bağımlılığı ortadan kaldırır.
+        dialog_options = QFileDialog.Options()
+        dialog_options |= QFileDialog.DontUseNativeDialog
+        default_name = datetime.now().strftime("rsdm_log_%Y%m%d_%H%M%S.csv")
+        default_path = os.fspath(Path.home() / default_name)
         path, _ = QFileDialog.getSaveFileName(
             self,
             "Log dosyası seç (CSV)",
-            "",
-            "CSV Files (*.csv);;All Files (*)"
+            default_path,
+            "CSV Files (*.csv);;All Files (*)",
+            options=dialog_options,
         )
         if not path:
             return
+        if not Path(path).suffix:
+            path += ".csv"
 
         try:
             f = open(path, "w", encoding="utf-8", newline="")
