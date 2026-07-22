@@ -90,6 +90,7 @@ class rsdm(QWidget):
 
         # 2) Widget referanslarını bağla
         self.bind_widgets()
+        self.arrange_control_sections()
         # 3) Sinyal/slot bağlantıları
         self.connect_signals()
         # 4) Tablo ayarları
@@ -251,6 +252,7 @@ QGroupBox::title {
         self.ui.btnSeqCreate = self.w(QPushButton, "seqCreatePb")
         self.ui.pbNextPoint = self.w(QPushButton, "pbNextPoint")
         self.ui.countSpin = self.w(QSpinBox, "seqCntSb")
+        self.ui.seqTotalLabel = self.w(QLabel, "seqTotalLabel")
 
         # Dört köşeli alan taraması
         self.ui.areaSelectA = self.w(QPushButton, "areaSelectAPb")
@@ -314,6 +316,34 @@ QGroupBox::title {
         self.ui.pbStartLogging = self.w(QPushButton, "pbStartLogging", required=False)
         self.ui.pbStopLogging = self.w(QPushButton, "pbStopLogging", required=False)
 
+    def arrange_control_sections(self):
+        """Place Manual beside the table and stack planning controls in order."""
+        control_panel = self.w(QWidget, "controlPanelGb")
+        point_editor = self.w(QWidget, "pointEditorGb")
+        control_layout = control_panel.layout()
+        point_layout = point_editor.layout()
+
+        manual = self.w(QWidget, "groupBox_4")
+        store = self.w(QWidget, "groupBox_10")
+        sequential = self.w(QWidget, "groupBox_8")
+        area = self.w(QWidget, "areaScanGb")
+        automatic = self.w(QWidget, "groupBox_5")
+
+        control_layout.removeWidget(manual)
+        point_layout.removeWidget(area)
+        manual.setParent(point_editor)
+        area.setParent(control_panel)
+        point_layout.addWidget(manual, 1, 0)
+        point_layout.setRowStretch(0, 1)
+        point_layout.setRowStretch(1, 0)
+
+        for widget in (store, sequential, area, automatic):
+            control_layout.removeWidget(widget)
+        for row, widget in enumerate((store, sequential, area, automatic)):
+            control_layout.addWidget(widget, row, 0)
+            widget.show()
+        manual.show()
+
     def connect_signals(self):
         # Label tıklama
         self.label.clicked.connect(self.on_label_clicked)
@@ -322,6 +352,8 @@ QGroupBox::title {
         self.ui.btnSeqFirst.clicked.connect(self.on_select_first_clicked)
         self.ui.btnSeqLast.clicked.connect(self.on_select_last_clicked)
         self.ui.btnSeqCreate.clicked.connect(self.on_clicked_create_btn)
+        self.ui.countSpin.valueChanged.connect(self._update_sequential_total)
+        self._update_sequential_total()
         self.ui.pbNextPoint.clicked.connect(self.on_clicked_next_point_btn)
         self.ui.areaSelectA.clicked.connect(lambda: self.on_area_select_clicked("A"))
         self.ui.areaSelectB.clicked.connect(lambda: self.on_area_select_clicked("B"))
@@ -982,6 +1014,7 @@ QGroupBox::title {
         if self._scan_sequence_active:
             return
         self._reset_area_selection()
+        self._reset_sequential_selection_labels()
         self.label.start_select_first()
         self._reset_step_counters()
         self._track_steps = True
@@ -996,6 +1029,14 @@ QGroupBox::title {
         self._track_steps = False
         # O anki D'yi yakala
         self._last_distance_at_select = self._last_distance
+
+    def _update_sequential_total(self, *_):
+        total = int(self.ui.countSpin.value()) + 1
+        self.ui.seqTotalLabel.setText(f"Generated Points: {total}")
+
+    def _reset_sequential_selection_labels(self):
+        self.ui.btnSeqFirst.setText("Select First Point")
+        self.ui.btnSeqLast.setText("Select Last Point")
 
     # ---------- Dört köşeli alan seçimi ----------
     def _update_area_total(self, *_):
@@ -1038,12 +1079,20 @@ QGroupBox::title {
         if self._last_distance is None:
             QMessageBox.warning(self, "Area Scan", "Bu köşe için geçerli mesafe ölçümü yok.")
             return
+        if corner == "A":
+            self._reset_area_selection()
         self._track_steps = False
         self.label.first_point = None
         self.label.last_point = None
         self.label.start_select_area(corner)
 
     def on_selection_completed(self, mode: str, x: int, y: int):
+        if mode == "first":
+            self.ui.btnSeqFirst.setText("First Point Selected")
+            return
+        if mode == "last":
+            self.ui.btnSeqLast.setText("Last Point Selected")
+            return
         if not mode.startswith("area:"):
             return
         corner = mode.split(":", 1)[1]
@@ -1545,14 +1594,14 @@ QGroupBox::title {
             QMessageBox.information(self, "Bilgi", "Önce 'Select First Point' ve 'Select Last Point' ile iki nokta seçin.")
             return
 
-        n = 10
+        divisions = 1
         if self.ui.countSpin:
             try:
-                n = int(self.ui.countSpin.value())
+                divisions = int(self.ui.countSpin.value())
             except Exception:
                 pass
-        if n < 2:
-            n = 2
+        divisions = max(1, divisions)
+        point_count = divisions + 1
 
         # --- Görsel kısmı (UI tablo ve marker'lar) ---
         (x1, y1) = self.label.first_point
@@ -1561,8 +1610,8 @@ QGroupBox::title {
         self.table.setRowCount(0)
         self.label.markers.clear()
 
-        for i in range(n):
-            t = i / (n - 1)
+        for i in range(point_count):
+            t = i / divisions
             x = int(round(x1 + (x2 - x1) * t))
             y = int(round(y1 + (y2 - y1) * t))
             row = self.table.rowCount()
@@ -1601,7 +1650,7 @@ QGroupBox::title {
         print("\n=== plan_laser_path GİRDİ ===")
         print(f"D1={D1:.3f}, Pitch_1=0.000, Yaw_1=0.000")
         print(f"D2={D2:.3f}, Pitch_2={dPitch_deg:.4f}, Yaw_2={dYaw_deg:.4f}")
-        print(f"N={n}")
+        print(f"Divisions={divisions}, Generated Points={point_count}")
         print(f"X (Yaw): steps={dx_steps} → {dYaw_deg:.6f}°  |  Y (Pitch): steps={dy_steps} → {dPitch_deg:.6f}°")
         print(f"Stepper X: step_angle={self.STEP_ANGLE_DEG_X}°, µstep=/{self.MICROSTEP_DIV_X}, gear={self.GEAR_RATIO_X}")
         print(f"Stepper Y: step_angle={self.STEP_ANGLE_DEG_Y}°, µstep=/{self.MICROSTEP_DIV_Y}, gear={self.GEAR_RATIO_Y}")
@@ -1625,7 +1674,7 @@ QGroupBox::title {
                 D2=float(D2),
                 Pitch_2=float(dPitch_deg),
                 Yaw_2=float(dYaw_deg),
-                N=int(n - 1),  # plan fonksiyonu N segmente göre (N+1 nokta) döndürüyor
+                N=int(divisions),
                 stepper_pitch=cfg_y,
                 stepper_yaw=cfg_x,
             )
