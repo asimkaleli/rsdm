@@ -7,7 +7,7 @@
     <x>0</x>
     <y>0</y>
     <width>1638</width>
-    <height>699</height>
+    <height>754</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -28,7 +28,7 @@ QGroupBox::title {
      <x>0</x>
      <y>0</y>
      <width>878</width>
-     <height>691</height>
+     <height>751</height>
     </rect>
    </property>
    <property name="font">
@@ -84,7 +84,7 @@ QGroupBox::title {
      <x>1120</x>
      <y>0</y>
      <width>251</width>
-     <height>691</height>
+     <height>751</height>
     </rect>
    </property>
    <property name="font">
@@ -139,7 +139,7 @@ QGroupBox::title {
          <item row="3" column="0">
           <widget class="QPushButton" name="pbScanPoints">
            <property name="text">
-             <string>Scan Points (Last → First)</string>
+            <string>Scan Points (Last → First)</string>
            </property>
           </widget>
          </item>
@@ -354,7 +354,7 @@ QGroupBox::title {
      <x>879</x>
      <y>0</y>
      <width>241</width>
-     <height>691</height>
+     <height>751</height>
     </rect>
    </property>
    <property name="font">
@@ -419,7 +419,7 @@ QGroupBox::title {
      <x>1372</x>
      <y>0</y>
      <width>261</width>
-     <height>691</height>
+     <height>751</height>
     </rect>
    </property>
    <property name="font">
