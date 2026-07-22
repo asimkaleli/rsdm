@@ -117,8 +117,14 @@ class StepperWorkerTests(unittest.TestCase):
     def test_signed_moves_are_atomic_and_finish(self):
         steps = []
         finished = []
+        timing_reports = []
         done = threading.Event()
         self.worker.step.connect(steps.append)
+        self.worker.timingReport.connect(
+            lambda count, mean_ms, jitter_ms: timing_reports.append(
+                (count, mean_ms, jitter_ms)
+            )
+        )
 
         def on_finished(move_id, completed):
             finished.append((move_id, completed))
@@ -132,6 +138,8 @@ class StepperWorkerTests(unittest.TestCase):
         self.assertTrue(done.wait(2))
         self.assertEqual(steps, [1] * 5 + [-1] * 3)
         self.assertEqual(finished, [(forward_id, True), (reverse_id, True)])
+        self.assertEqual([report[0] for report in timing_reports], [4, 2])
+        self.assertTrue(all(report[1] > 0 for report in timing_reports))
         self.assertFalse(self.worker.is_busy())
 
     def test_cancel_reports_incomplete_and_stops_early(self):

@@ -102,6 +102,7 @@ class StepperWorker(QObject):
     busyChanged = Signal(bool)
     moveStarted = Signal(int, int)   # move_id, signed_steps
     moveFinished = Signal(int, bool)  # move_id, completed; False means cancelled
+    timingReport = Signal(int, float, float)  # pulse intervals, mean period ms, max jitter ms
 
     def __init__(self, pins: MotorPins, shared: Optional[SharedPins] = None, parent=None):
         super().__init__(parent)
@@ -127,6 +128,11 @@ class StepperWorker(QObject):
         self._total = 0
         self._busy = False
         self._next_move_id = 1
+        self._timing_count = 0
+        self._timing_period_sum_s = 0.0
+        self._timing_max_jitter_s = 0.0
+        self._timing_last_start = None
+        self._timing_last_expected_period_s = None
 
         self._apply_dir()
         self._wake(True)
@@ -146,6 +152,8 @@ class StepperWorker(QObject):
 
     def _pulse_once(self, edge_s: Optional[float] = None):
         pulse_edge_s = self._edge_s if edge_s is None else max(0.0005, float(edge_s))
+        pulse_start = time.monotonic()
+        self._record_pulse_timing(pulse_start, 2.0 * pulse_edge_s)
         self._step_line.set_value(1)
         time.sleep(pulse_edge_s)
         self._step_line.set_value(0)
@@ -154,6 +162,35 @@ class StepperWorker(QObject):
         self._total += 1
         self.progress.emit(self._total)
         self.step.emit(delta)
+
+    def _reset_timing(self):
+        self._timing_count = 0
+        self._timing_period_sum_s = 0.0
+        self._timing_max_jitter_s = 0.0
+        self._timing_last_start = None
+        self._timing_last_expected_period_s = None
+
+    def _record_pulse_timing(self, pulse_start: float, expected_period_s: float):
+        if self._timing_last_start is not None:
+            actual_period_s = pulse_start - self._timing_last_start
+            expected_s = self._timing_last_expected_period_s
+            jitter_s = actual_period_s - expected_s
+            self._timing_count += 1
+            self._timing_period_sum_s += actual_period_s
+            self._timing_max_jitter_s = max(
+                self._timing_max_jitter_s, abs(jitter_s)
+            )
+        self._timing_last_start = pulse_start
+        self._timing_last_expected_period_s = expected_period_s
+
+    def _emit_timing_report(self):
+        if self._timing_count > 0:
+            mean_period_ms = 1000.0 * self._timing_period_sum_s / self._timing_count
+            max_jitter_ms = 1000.0 * self._timing_max_jitter_s
+            self.timingReport.emit(
+                self._timing_count, mean_period_ms, max_jitter_ms
+            )
+        self._reset_timing()
 
     def _profile_edge_s(self, completed: int, remaining: int) -> float:
         """Trapezoidal/triangular profile expressed as pulse edge duration."""
@@ -199,6 +236,7 @@ class StepperWorker(QObject):
         if self._active_move is not None:
             cancelled.append(self._active_move[0])
             self._active_move = None
+            self._emit_timing_report()
         while self._moves:
             cancelled.append(self._moves.popleft()[0])
 
@@ -237,13 +275,18 @@ class StepperWorker(QObject):
                 else:
                     self._jog_forward = bool(args[0])
                     self._jog_steps = 0
+                    self._reset_timing()
                     self._jog = True
                     self._wake(True)
             elif name == "jog_stop":
+                if self._jog:
+                    self._emit_timing_report()
                 self._jog = False
             elif name == "cancel_moves":
                 self._cancel_moves_in_worker()
             elif name == "emergency_stop":
+                if self._jog:
+                    self._emit_timing_report()
                 self._jog = False
                 self._cancel_moves_in_worker()
             elif name == "reset":
@@ -317,6 +360,7 @@ class StepperWorker(QObject):
                     move_id, signed_steps = self._moves.popleft()
                     total_steps = abs(signed_steps)
                     self._active_move = [move_id, total_steps, total_steps, 0]
+                    self._reset_timing()
                     self._wake(True)
                     self._forward = signed_steps > 0
                     self._apply_dir()
@@ -332,6 +376,7 @@ class StepperWorker(QObject):
                     if self._active_move[1] <= 0:
                         move_id = self._active_move[0]
                         self._active_move = None
+                        self._emit_timing_report()
                         self.moveFinished.emit(move_id, True)
                 elif self._jog:
                     if self._forward != self._jog_forward:
@@ -382,6 +427,7 @@ class MotorController(QObject):
     busyChanged = Signal(bool)
     moveStarted = Signal(int, int)
     moveFinished = Signal(int, bool)
+    timingReport = Signal(int, float, float)
 
     def __init__(self, pins: MotorPins, shared: Optional[SharedPins] = None, parent=None):
         super().__init__(parent)
@@ -395,6 +441,7 @@ class MotorController(QObject):
         self.worker.busyChanged.connect(self.busyChanged)
         self.worker.moveStarted.connect(self.moveStarted)
         self.worker.moveFinished.connect(self.moveFinished)
+        self.worker.timingReport.connect(self.timingReport)
         self.th.started.connect(self.worker.run)
         self.th.start()
 

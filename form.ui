@@ -118,14 +118,14 @@ QGroupBox::title {
          <item row="0" column="0">
           <widget class="QPushButton" name="pbNextPoint">
            <property name="text">
-            <string>Next Point</string>
+             <string>Next Point (→ First)</string>
            </property>
           </widget>
          </item>
          <item row="1" column="0">
           <widget class="QLabel" name="label_5">
            <property name="text">
-            <string>Scanning Speed (sn):</string>
+            <string>Point Interval (s):</string>
            </property>
           </widget>
          </item>
@@ -139,7 +139,7 @@ QGroupBox::title {
          <item row="3" column="0">
           <widget class="QPushButton" name="pbScanPoints">
            <property name="text">
-            <string>Scan Points</string>
+             <string>Scan Points (Last → First)</string>
            </property>
           </widget>
          </item>
@@ -314,7 +314,7 @@ QGroupBox::title {
        </font>
       </property>
       <property name="title">
-       <string>Manual Save Point</string>
+       <string>Store Points</string>
       </property>
       <property name="alignment">
        <set>Qt::AlignCenter</set>
@@ -354,57 +354,6 @@ QGroupBox::title {
    </property>
    <layout class="QGridLayout" name="gridLayout_6">
     <item row="0" column="0">
-     <widget class="QPushButton" name="selectButton">
-      <property name="text">
-       <string>Select Photo</string>
-      </property>
-     </widget>
-    </item>
-    <item row="2" column="0">
-     <widget class="QGroupBox" name="groupBox_6">
-      <property name="font">
-       <font>
-        <bold>true</bold>
-       </font>
-      </property>
-      <property name="title">
-       <string>Add Manual Point</string>
-      </property>
-      <property name="alignment">
-       <set>Qt::AlignCenter</set>
-      </property>
-      <layout class="QGridLayout" name="gridLayout_4">
-       <item row="1" column="0">
-        <widget class="QLabel" name="yLabel">
-         <property name="text">
-          <string>Y:</string>
-         </property>
-        </widget>
-       </item>
-       <item row="1" column="1">
-        <widget class="QLineEdit" name="yInput"/>
-       </item>
-       <item row="0" column="1">
-        <widget class="QLineEdit" name="xInput"/>
-       </item>
-       <item row="0" column="0">
-        <widget class="QLabel" name="xLabel">
-         <property name="text">
-          <string>X:</string>
-         </property>
-        </widget>
-       </item>
-       <item row="2" column="0" colspan="2">
-        <widget class="QPushButton" name="xyAddButton">
-         <property name="text">
-          <string>Add Point</string>
-         </property>
-        </widget>
-       </item>
-      </layout>
-     </widget>
-    </item>
-    <item row="1" column="0">
      <widget class="QGroupBox" name="groupBox_7">
       <property name="font">
        <font>
@@ -412,7 +361,7 @@ QGroupBox::title {
        </font>
       </property>
       <property name="title">
-       <string>Coordinate</string>
+       <string>Target Angles</string>
       </property>
       <property name="alignment">
        <set>Qt::AlignCenter</set>
@@ -613,23 +562,23 @@ QGroupBox::title {
        </font>
       </property>
       <property name="title">
-       <string>Save Log</string>
+       <string>Logging</string>
       </property>
       <property name="alignment">
        <set>Qt::AlignCenter</set>
       </property>
       <layout class="QGridLayout" name="gridLayout_16">
        <item row="0" column="0">
-        <widget class="QPushButton" name="pbStartLoging">
+        <widget class="QPushButton" name="pbStartLogging">
          <property name="text">
-          <string>Start Loging</string>
+          <string>Start Logging</string>
          </property>
         </widget>
        </item>
        <item row="1" column="0">
-        <widget class="QPushButton" name="pbStopLoging">
+        <widget class="QPushButton" name="pbStopLogging">
          <property name="text">
-          <string>Stop Loging</string>
+          <string>Stop Logging</string>
          </property>
         </widget>
        </item>
