@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-from PySide2.QtWidgets import QLabel, QTableWidgetItem
+from PySide2.QtWidgets import QLabel
 from PySide2.QtCore import Qt, Signal
 from PySide2.QtGui import QPainter, QPen, QColor, QCursor
 
@@ -10,8 +10,6 @@ class ClickableLabel(QLabel):
         super().__init__(*args, **kwargs)
         self.markers = []              # [(row_index, x, y)]
         self.pixmap_orig = None
-        self.dragging_index = None
-        self.table_ref = None
         self.select_mode = None        # None | 'first' | 'last'
         self.first_point = None
         self.last_point = None
@@ -30,9 +28,6 @@ class ClickableLabel(QLabel):
         self.last_point = None
         self.setCursor(QCursor(Qt.ArrowCursor))
         self.update()
-
-    def set_table(self, table):
-        self.table_ref = table
 
     def setPixmap(self, pixmap):
         super().setPixmap(pixmap)
@@ -84,26 +79,7 @@ class ClickableLabel(QLabel):
                 self.setCursor(QCursor(Qt.ArrowCursor))
                 self.update()
                 return
-            for i, (row_index, mx, my) in enumerate(self.markers):
+            for row_index, mx, my in self.markers:
                 if (x - mx) ** 2 + (y - my) ** 2 <= 10 ** 2:
-                    self.dragging_index = i
-                    self.setCursor(QCursor(Qt.ClosedHandCursor))
                     return
             self.clicked.emit(x, y)
-
-    def mouseMoveEvent(self, event):
-        if self.dragging_index is not None and event.buttons() & Qt.LeftButton:
-            x, y = event.pos().x(), event.pos().y()
-            row_index, old_x, old_y = self.markers[self.dragging_index]
-            self.markers[self.dragging_index] = (row_index, x, y)
-            if self.first_point == (old_x, old_y): self.first_point = (x, y)
-            if self.last_point  == (old_x, old_y): self.last_point  = (x, y)
-            self.update()
-            if self.table_ref:
-                self.table_ref.setItem(row_index, 0, QTableWidgetItem(str(x)))
-                self.table_ref.setItem(row_index, 1, QTableWidgetItem(str(y)))
-
-    def mouseReleaseEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            self.dragging_index = None
-            self.setCursor(QCursor(Qt.ArrowCursor))

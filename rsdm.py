@@ -125,6 +125,7 @@ QGroupBox::title {
         self._steps_y_abs = 0   # motorY (Pitch) mutlak step sayacı
         self._origin_steps_x = None  # pbStorePoint ile alınan referans X
         self._origin_steps_y = None  # pbStorePoint ile alınan referans Y
+        self._origin_angle_row = None  # Store Point serisinin 0,0 referans satırı
 
         # pbStorePoint sonrası marker bekleme durumu
         self._awaiting_marker_click = False
@@ -270,9 +271,6 @@ QGroupBox::title {
         # Manuel nokta kaydetme butonu (Pitch/Yaw)
         self.ui.pbStorePoint = self.w(QPushButton, "pbStorePoint", required=False)
 
-        # Label ↔ tablo bağlantısı
-        self.label.set_table(self.ui.table)
-
         if self.ui.leDistance:
             self.ui.leDistance.setReadOnly(True)
             self.ui.leDistance.setText("--")
@@ -295,16 +293,6 @@ QGroupBox::title {
 
         self.ui.pbStartLoging = self.w(QPushButton, "pbStartLoging", required=False)
         self.ui.pbStopLoging = self.w(QPushButton, "pbStopLoging", required=False)
-
-        self.ui.test_l_btn = self.w(QPushButton, "test_l_btn", required=False)
-        self.ui.test_r_btn = self.w(QPushButton, "test_r_btn", required=False)
-        self.ui.test_l_label = self.w(QLineEdit,  "test_l_label", required=False)
-        self.ui.test_r_label = self.w(QLineEdit,  "test_r_label", required=False)
-
-
-
-
-
 
     def connect_signals(self):
         # Dosya seç
@@ -348,22 +336,9 @@ QGroupBox::title {
         self.ui.pbStartLoging.clicked.connect(self.on_pb_start_logging)
         self.ui.pbStopLoging.clicked.connect(self.on_pb_stop_logging)
 
-        self.ui.test_l_btn.clicked.connect(self.on_test_l_btn)
-        self.ui.test_r_btn.clicked.connect(self.on_test_r_btn)
-
-
-    def on_test_l_btn(self):
-
-        self.motorX.set_direction(True)
-        self.motorX.move_steps(int(self.ui.test_l_label.text()))
-
-
-    def on_test_r_btn(self):
-        self.motorX.set_direction(False)
-        self.motorX.move_steps(int(self.ui.test_r_label.text()))
-
     # ---------- Tablo ayarı ----------
     def setup_table(self):
+        self.table.setHorizontalHeaderLabels(["Pitch", "Yaw", "Del"])
         header = self.table.horizontalHeader()
         for col in range(self.table.columnCount()):
             if col in [0, 1]:
@@ -775,8 +750,12 @@ QGroupBox::title {
         # Aksi halde: klasik davranış (x,y tablosu için)
         row_position = self.table.rowCount()
         self.table.insertRow(row_position)
-        self.table.setItem(row_position, 0, QTableWidgetItem(str(x)))
-        self.table.setItem(row_position, 1, QTableWidgetItem(str(y)))
+        x_item = QTableWidgetItem(str(x))
+        y_item = QTableWidgetItem(str(y))
+        x_item.setData(Qt.UserRole, "image")
+        y_item.setData(Qt.UserRole, "image")
+        self.table.setItem(row_position, 0, x_item)
+        self.table.setItem(row_position, 1, y_item)
 
         btn = self._make_delete_btn(framed=True)
         btn.setFocusPolicy(Qt.NoFocus)
@@ -801,6 +780,19 @@ QGroupBox::title {
             if cell_widget:
                 layout = cell_widget.layout()
                 if layout and layout.itemAt(0).widget() == button:
+                    if row == getattr(self, "_origin_angle_row", None):
+                        other_angle_rows = [
+                            angle_row for angle_row in self._get_angle_rows()
+                            if angle_row != row
+                        ]
+                        if other_angle_rows:
+                            QMessageBox.warning(
+                                self,
+                                "Referans Noktası",
+                                "Bu satır açı serisinin referansıdır. "
+                                "Önce referansa bağlı diğer açı noktalarını silin.",
+                            )
+                            return
                     self.table.removeRow(row)
                     break
 
@@ -822,8 +814,12 @@ QGroupBox::title {
 
         row_position = self.table.rowCount()
         self.table.insertRow(row_position)
-        self.table.setItem(row_position, 0, QTableWidgetItem(str(x)))
-        self.table.setItem(row_position, 1, QTableWidgetItem(str(y)))
+        x_item = QTableWidgetItem(str(x))
+        y_item = QTableWidgetItem(str(y))
+        x_item.setData(Qt.UserRole, "image")
+        y_item.setData(Qt.UserRole, "image")
+        self.table.setItem(row_position, 0, x_item)
+        self.table.setItem(row_position, 1, y_item)
 
         btn = self._make_delete_btn(framed=True)
         cell_widget = QWidget()
@@ -839,15 +835,45 @@ QGroupBox::title {
         self.ui.yInput.clear()
 
     def on_rows_removed(self, parent_index, first, last):
-        if not self.label.markers:
-            return
+        shift = last - first + 1
+
+        def shifted_row(row):
+            if row is None:
+                return None
+            if first <= row <= last:
+                return None
+            return row - shift if row > last else row
+
+        current_row = getattr(self, "_current_log_row", None)
+        new_current_row = shifted_row(current_row)
+        if current_row is not None and new_current_row is None:
+            self._clear_log_target()
+        elif new_current_row is not None:
+            self._current_log_row = new_current_row
+
+        self._last_log_row = shifted_row(getattr(self, "_last_log_row", None))
+        self._last_store_row = shifted_row(getattr(self, "_last_store_row", None))
+        if self._last_store_row is None:
+            self._awaiting_marker_click = False
+
+        # Satır sırası değiştiğinde mevcut tarama indeksleri ve planner-row
+        # eşleşmesi artık güvenilir değildir.
+        self._scan_angle_index = 0
+        self._scan_step_index = 0
+        self._planner_result = None
+
+        old_origin_row = getattr(self, "_origin_angle_row", None)
+        self._origin_angle_row = shifted_row(old_origin_row)
+        if old_origin_row is not None and self._origin_angle_row is None:
+            self._origin_steps_x = None
+            self._origin_steps_y = None
+
         kept = []
         for idx, x, y in self.label.markers:
             if first <= idx <= last:
                 continue
             kept.append((idx, x, y))
         self.label.markers = kept
-        shift = (last - first + 1)
         new_markers = []
         for idx, x, y in self.label.markers:
             if idx > last:
@@ -872,7 +898,7 @@ QGroupBox::title {
         table = self.ui.table
         for r in range(table.rowCount()):
             item = table.item(r, 0)
-            if item is not None and item.data(Qt.UserRole) == "angle":
+            if item is not None and item.data(Qt.UserRole) == "stored_angle":
                 rows.append(r)
         return rows
 
@@ -923,13 +949,9 @@ QGroupBox::title {
         # --- HAREKETTEN ÖNCE: log satırını temizle ---
         self._clear_log_target()
 
-        # Hareketleri sırayla gönder
-        self._move_signed_steps(self.motorX, delta_x)
-        self._move_signed_steps(self.motorY, delta_y)
-
-        if not self._wait_both_idle(timeout_ms=300000):
+        if not self._move_both_signed_and_wait(delta_x, delta_y, timeout_ms=300000):
             QMessageBox.critical(self, "Tarama Hatası",
-                                 f"Row {row} konumuna giderken zaman aşımı.")
+                                 f"Row {row} konumuna hareket tamamlanamadı.")
             return False
 
         # --- HAREKET BİTTİ: Artık bu row'dayız → loglar bu row'a yazılsın ---
@@ -941,50 +963,6 @@ QGroupBox::title {
 
         return True
 
-
-    def _log_angle_row(self, row: int):
-        """
-        Verilen angle satırı için:
-        - Pitch (deg)
-        - Yaw   (deg)
-        - Son mesafe (self._last_distance)
-        - Zaman (ISO)
-        değerlerini log dosyasına yazar.
-        """
-        if not (self._logging_enabled and self._log_file):
-            return
-
-        table = self.ui.table
-        pitch_item = table.item(row, 0)
-        yaw_item   = table.item(row, 1)
-        if pitch_item is None or yaw_item is None:
-            return
-
-        try:
-            pitch = float(pitch_item.text())
-            yaw   = float(yaw_item.text())
-        except ValueError:
-            return
-
-        dist = self._last_distance
-        unit = self._last_distance_unit or ""
-        ts   = datetime.now().isoformat(timespec="seconds")
-
-        # CSV satırı: row,pitch,yaw,distance,unit,timestamp
-        line = f"{row},{pitch:.4f},{yaw:.4f},"
-        if dist is not None:
-            line += f"{dist:.4f},{unit}"
-        else:
-            line += ","  # mesafe yoksa boş bırak
-        line += f",{ts}\n"
-
-        try:
-            self._log_file.write(line)
-            self._log_file.flush()
-        except Exception as e:
-            self._logging_enabled = False
-            QMessageBox.critical(self, "Log Hatası",
-                                 f"Log dosyasına yazarken hata oluştu, log durduruldu:\n{e}")
 
     # ---------- Seçim ve adım sayacı ----------
     def _reset_step_counters(self):
@@ -1041,11 +1019,11 @@ QGroupBox::title {
     def on_pb_store_point(self):
         """
         pbStorePoint:
-        1) coordTable BOŞSA:
+        1) Tabloda hiç angle satırı yoksa:
            - Bu konumu referans (ilk nokta) olarak alır.
            - Pitch=0, Yaw=0 yazar.
            - _scan_angle_index sıfırlanır (Next Point yeni listede baştan başlar).
-        2) coordTable BOŞ DEĞİLSE:
+        2) En az bir angle satırı varsa:
            - Mevcut referansa göre Pitch/Yaw hesaplar ve yeni satır ekler.
         3) Satır tipini 'angle' olarak işaretler (Next/Scan Points buna göre çalışır).
         """
@@ -1055,10 +1033,11 @@ QGroupBox::title {
         sx = self._steps_x_abs   # MotorX → Yaw
         sy = self._steps_y_abs   # MotorY → Pitch
 
-        row_count = table.rowCount()
+        angle_rows = self._get_angle_rows()
+        is_new_series = not angle_rows
 
-        # --- 1) Tabloda hiç satır yoksa: ilk nokta (referans) ---
-        if row_count == 0:
+        # --- 1) Hiç angle satırı yoksa: ilk nokta (referans) ---
+        if is_new_series:
             # Bu çağrıyı "ilk nokta" olarak kabul et
             self._origin_steps_x = sx
             self._origin_steps_y = sy
@@ -1068,10 +1047,14 @@ QGroupBox::title {
             yaw_deg = 0.0
 
         else:
-            # Referans henüz set edilmemişse, bu çağrıda set et
             if self._origin_steps_x is None or self._origin_steps_y is None:
-                self._origin_steps_x = sx
-                self._origin_steps_y = sy
+                QMessageBox.warning(
+                    self,
+                    "Referans Noktası",
+                    "Açı satırları var fakat motor referansı geçersiz. "
+                    "Yeni seri için önce mevcut açı satırlarını silin.",
+                )
+                return
 
             dx_steps = sx - self._origin_steps_x
             dy_steps = sy - self._origin_steps_y
@@ -1087,13 +1070,15 @@ QGroupBox::title {
         # --- Ortak kısım: tabloya satır ekle ---
         row = table.rowCount()
         table.insertRow(row)
+        if is_new_series:
+            self._origin_angle_row = row
 
         pitch_item = QTableWidgetItem(f"{pitch_deg:.4f}")
         yaw_item   = QTableWidgetItem(f"{yaw_deg:.4f}")
 
         # Bu satırın "açı satırı" olduğunu işaretle
-        pitch_item.setData(Qt.UserRole, "angle")
-        yaw_item.setData(Qt.UserRole, "angle")
+        pitch_item.setData(Qt.UserRole, "stored_angle")
+        yaw_item.setData(Qt.UserRole, "stored_angle")
 
         table.setItem(row, 0, pitch_item)
         table.setItem(row, 1, yaw_item)
@@ -1236,8 +1221,8 @@ QGroupBox::title {
         dist = self._last_distance
         unit = self._last_distance_unit or ""
 
-        # Daha okunabilir zaman: "2025-11-16 15:27:15"
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # Milisaniye hassasiyetli zaman: "2026-07-22 20:39:28.123"
+        ts = datetime.now().isoformat(sep=" ", timespec="milliseconds")
 
         # CSV satırı: row,pitch_deg,yaw_deg,distance,unit,timestamp
         parts = []
@@ -1393,6 +1378,27 @@ QGroupBox::title {
         dp = result.get("pitch_steps_delta", [])
         dy = result.get("yaw_steps_delta", [])
 
+        if len(dpy) != self.table.rowCount():
+            self.table.setRowCount(0)
+            self.label.markers.clear()
+            self.label.update()
+            QMessageBox.critical(
+                self,
+                "Planlama Hatası",
+                "Planner hedef sayısı tablo satır sayısıyla eşleşmiyor.",
+            )
+            return
+
+        # Fotoğraf marker'ları piksel konumlarını ayrı listede tutar. Tabloda
+        # ise kullanıcının göreceği gerçek hedef Pitch/Yaw açıları bulunur.
+        for row, (_, pitch, yaw) in enumerate(dpy):
+            pitch_item = QTableWidgetItem(f"{pitch:.4f}")
+            yaw_item = QTableWidgetItem(f"{yaw:.4f}")
+            pitch_item.setData(Qt.UserRole, "sequential")
+            yaw_item.setData(Qt.UserRole, "sequential")
+            self.table.setItem(row, 0, pitch_item)
+            self.table.setItem(row, 1, yaw_item)
+
         print("\n--- Noktalar: XYZ ---")
         for i, p in enumerate(xyz):
             x, y, z = p
@@ -1503,12 +1509,9 @@ QGroupBox::title {
         sys.stdout.flush()
 
         self._clear_log_target()
-        self._move_signed_steps(self.motorX, inv_y)
-        self._move_signed_steps(self.motorY, inv_p)
-
-        if not self._wait_both_idle(timeout_ms=300000):
+        if not self._move_both_signed_and_wait(inv_y, inv_p, timeout_ms=300000):
             QMessageBox.critical(self, "Tarama Hatası",
-                                 f"Segment {i} tamamlanmadan zaman aşımı.")
+                                 f"Segment {i} hareketi tamamlanamadı.")
             return
 
         print(f"[MANUAL] segment {i:02d} tamamlandı.")
@@ -1559,11 +1562,13 @@ QGroupBox::title {
                 sys.stdout.flush()
                 ok = self._goto_angle_row(row, wait_s=wait_s)
                 if not ok:
+                    self._clear_log_target()
                     QMessageBox.critical(self, "Tarama Hatası",
                                          f"Row {row} noktasına giderken hata oluştu.")
                     return
 
 
+            self._clear_log_target()
             print("=== AÇISAL SCAN BİTTİ ===\n")
             sys.stdout.flush()
             QMessageBox.information(self, "Scanning", "Açısal noktalar için tarama tamamlandı.")
@@ -1635,13 +1640,10 @@ QGroupBox::title {
                       f"(orijinal ileri yönde: yaw={yaw_d[i]:+d}, pitch={pitch_d[i]:+d})")
                 sys.stdout.flush()
 
-                # Hareketleri sırayla kuyrukla
-                self._move_signed_steps(self.motorX, inv_y)
-                self._move_signed_steps(self.motorY, inv_p)
-
-                # Her iki motorun da bitirmesini bekle (busy → idle)
-                if not self._wait_both_idle(timeout_ms=300000):  # 5dk üst sınır; gerekirse artır
-                    raise RuntimeError(f"Segment {i} tamamlanmadan zaman aşımı.")
+                if not self._move_both_signed_and_wait(
+                    inv_y, inv_p, timeout_ms=300000
+                ):
+                    raise RuntimeError(f"Segment {i} hareketi tamamlanamadı.")
 
                 cum_y += inv_y
                 cum_p += inv_p
@@ -1658,20 +1660,68 @@ QGroupBox::title {
                     sys.stdout.flush()
                     self._wait_seconds(wait_s)
 
+            self._clear_log_target()
             print("=== TARAMA BİTTİ ===\n")
             sys.stdout.flush()
             QMessageBox.information(self, "Scannig", "Scanning is done.")
 
         except Exception as e:
+            self._clear_log_target()
             QMessageBox.critical(self, "Tarama Hatası", str(e))
 
     # ---------- Hareket / zaman yardımcıları ----------
-    def _move_signed_steps(self, motor, steps: int):
-        """Pozitif → ileri/sağ/yukarı, negatif → geri/sol/aşağı."""
-        steps = int(steps)
-        if steps == 0 or motor is None:
-            return
-        motor.move_signed_steps(steps)
+    def _move_both_signed_and_wait(self, x_steps: int, y_steps: int,
+                                   timeout_ms: int = 120000) -> bool:
+        """İki hareket kimliğinin de başarıyla tamamlanmasını bekle."""
+        x_results = {}
+        y_results = {}
+
+        def on_x_finished(move_id: int, completed: bool):
+            x_results[int(move_id)] = bool(completed)
+
+        def on_y_finished(move_id: int, completed: bool):
+            y_results[int(move_id)] = bool(completed)
+
+        self.motorX.moveFinished.connect(on_x_finished)
+        self.motorY.moveFinished.connect(on_y_finished)
+        try:
+            x_id = self.motorX.move_signed_steps(int(x_steps))
+            y_id = self.motorY.move_signed_steps(int(y_steps))
+
+            if x_id == 0:
+                x_results[0] = True
+            if y_id == 0:
+                y_results[0] = True
+
+            deadline = time.monotonic() + max(1, int(timeout_ms)) / 1000.0
+            while time.monotonic() < deadline:
+                QApplication.processEvents()
+                x_done = x_id in x_results
+                y_done = y_id in y_results
+                if (x_done and not x_results[x_id]) or (y_done and not y_results[y_id]):
+                    self.motorX.emergency_stop()
+                    self.motorY.emergency_stop()
+                    return False
+                if x_done and y_done:
+                    return x_results[x_id] and y_results[y_id]
+                time.sleep(0.005)
+
+            self.motorX.emergency_stop()
+            self.motorY.emergency_stop()
+            return False
+        except Exception:
+            self.motorX.emergency_stop()
+            self.motorY.emergency_stop()
+            return False
+        finally:
+            try:
+                self.motorX.moveFinished.disconnect(on_x_finished)
+            except Exception:
+                pass
+            try:
+                self.motorY.moveFinished.disconnect(on_y_finished)
+            except Exception:
+                pass
 
     def _wait_seconds(self, seconds: float):
         """UI’yi dondurmadan bekle."""

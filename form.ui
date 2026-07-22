@@ -428,12 +428,12 @@ QGroupBox::title {
          </attribute>
          <column>
           <property name="text">
-           <string>X</string>
+            <string>Pitch</string>
           </property>
          </column>
          <column>
           <property name="text">
-           <string>Y</string>
+            <string>Yaw</string>
           </property>
          </column>
          <column>
@@ -637,52 +637,6 @@ QGroupBox::title {
      </widget>
     </item>
    </layout>
-  </widget>
-  <widget class="QPushButton" name="test_r_btn">
-   <property name="geometry">
-    <rect>
-     <x>1620</x>
-     <y>280</y>
-     <width>203</width>
-     <height>30</height>
-    </rect>
-   </property>
-   <property name="text">
-    <string>Test-Right</string>
-   </property>
-  </widget>
-  <widget class="QLineEdit" name="test_r_label">
-   <property name="geometry">
-    <rect>
-     <x>1620</x>
-     <y>230</y>
-     <width>201</width>
-     <height>29</height>
-    </rect>
-   </property>
-  </widget>
-  <widget class="QPushButton" name="test_l_btn">
-   <property name="geometry">
-    <rect>
-     <x>1620</x>
-     <y>370</y>
-     <width>203</width>
-     <height>30</height>
-    </rect>
-   </property>
-   <property name="text">
-    <string>Test-Left</string>
-   </property>
-  </widget>
-  <widget class="QLineEdit" name="test_l_label">
-   <property name="geometry">
-    <rect>
-     <x>1620</x>
-     <y>320</y>
-     <width>201</width>
-     <height>29</height>
-    </rect>
-   </property>
   </widget>
  </widget>
  <resources/>
