@@ -168,6 +168,19 @@ class StepperWorkerTests(unittest.TestCase):
         self.assertGreater(first, middle)
         self.assertAlmostEqual(first, last)
 
+    def test_inverted_dir_pin_preserves_logical_step_sign(self):
+        worker = motor_control.StepperWorker(
+            motor_control.MotorPins(step=13, dir=6, dir_inverted=True)
+        )
+        logical_steps = []
+        worker.step.connect(logical_steps.append)
+        worker._forward = True
+        worker._apply_dir()
+        worker._pulse_once(edge_s=0.0005)
+
+        self.assertEqual(logical_steps, [1])
+        self.assertEqual(worker._dir_line.values[-1], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

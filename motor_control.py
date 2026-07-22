@@ -85,6 +85,7 @@ class SharedPins:
 class MotorPins:
     step: int
     dir: int
+    dir_inverted: bool = False
     en: Optional[int] = None
     sleep: Optional[int] = None
     reset: Optional[int] = None
@@ -139,7 +140,8 @@ class StepperWorker(QObject):
             self.shared.set_sleep(awake)
 
     def _apply_dir(self):
-        self._dir_line.set_value(1 if self._forward else 0)
+        pin_forward = self._forward != self.pins.dir_inverted
+        self._dir_line.set_value(1 if pin_forward else 0)
         time.sleep(0.002)
 
     def _pulse_once(self, edge_s: Optional[float] = None):

@@ -143,7 +143,9 @@ QGroupBox::title {
 
             # 2) Motorlar
             self.motorX = MotorController(MotorPins(step=12, dir=5), shared=self.shared)  # Yaw ~ sağ/sol
-            self.motorY = MotorController(MotorPins(step=13, dir=6), shared=self.shared)  # Pitch ~ yukarı/aşağı
+            self.motorY = MotorController(
+                MotorPins(step=13, dir=6, dir_inverted=True), shared=self.shared
+            )  # Pitch ~ yukarı/aşağı; sürücünün DIR polaritesi ters
             self.motorX.set_motion_profile(self.MOTOR_START_SPS, self.MOTOR_ACCELERATION_SPS2)
             self.motorY.set_motion_profile(self.MOTOR_START_SPS, self.MOTOR_ACCELERATION_SPS2)
 
@@ -190,6 +192,10 @@ QGroupBox::title {
         # Hangi satırda beklerken zaman serisi loglanacağını tut
         self._current_log_row = None
         self._last_log_row = None
+        # Sequential tabloda X/Y piksel değerleri bulunduğundan, CSV için
+        # planner'ın hesapladığı hedef açıları ayrıca taşıyoruz.
+        self._current_log_pitch = None
+        self._current_log_yaw = None
 
         # --- Hız combobox varsayılanı uygulansın (UI hazır olduğunda) ---
         if self.ui.cbMotorSpeed:
@@ -407,6 +413,19 @@ QGroupBox::title {
             return
 
         self._log_current_state(row_index=row_idx)
+
+    def _clear_log_target(self):
+        """Hareket sırasında eski hedefe ölçüm yazılmasını engelle."""
+        self._current_log_row = None
+        self._current_log_pitch = None
+        self._current_log_yaw = None
+
+    def _set_log_target(self, row: int, pitch=None, yaw=None):
+        """Motor hedefe ulaştıktan sonra ölçümlerin bağlanacağı noktayı seç."""
+        self._current_log_row = int(row)
+        self._last_log_row = int(row)
+        self._current_log_pitch = None if pitch is None else float(pitch)
+        self._current_log_yaw = None if yaw is None else float(yaw)
 
     def _on_dim_strength(self, value: float, unit: str):
         if self.ui.cbModeSignalQuality and not self.ui.cbModeSignalQuality.isChecked():
@@ -902,7 +921,7 @@ QGroupBox::title {
         sys.stdout.flush()
 
         # --- HAREKETTEN ÖNCE: log satırını temizle ---
-        self._current_log_row = None
+        self._clear_log_target()
 
         # Hareketleri sırayla gönder
         self._move_signed_steps(self.motorX, delta_x)
@@ -914,8 +933,7 @@ QGroupBox::title {
             return False
 
         # --- HAREKET BİTTİ: Artık bu row'dayız → loglar bu row'a yazılsın ---
-        self._current_log_row = row
-        self._last_log_row = row
+        self._set_log_target(row)
 
         # Buradan sonra gelen tüm mesafe ölçümleri bu satıra loglanacak
         if wait_s > 0:
@@ -1098,8 +1116,7 @@ QGroupBox::title {
         # === LOG İÇİN AKTİF SATIR OLARAK İŞARETLE ===
         # Artık bu açı noktasına "erişmiş" sayıyoruz; log açıksa,
         # bu row için gelen tüm mesafe ölçümleri CSV'ye yazılacak.
-        self._current_log_row = row
-        self._last_log_row = row
+        self._set_log_target(row)
 
 
     def on_pb_start_logging(self):
@@ -1136,9 +1153,6 @@ QGroupBox::title {
         self._log_path = path
         self._logging_enabled = True
 
-        self._current_log_row = None
-        self._last_log_row = None
-
         QMessageBox.information(self, "Log", f"Loglama başlatıldı:\n{path}")
 
     def on_pb_stop_logging(self):
@@ -1174,8 +1188,11 @@ QGroupBox::title {
         if self.motorX.is_busy() or self.motorY.is_busy():
             return  # motor hareketliyken loglama
 
-        pitch = None
-        yaw = None
+        # Sequential hedeflerde tablo piksel X/Y tutar; bu durumda planner
+        # hedefleri kullanılır. Store Point satırlarında override None kalır
+        # ve değerler doğrudan tablodan okunur.
+        pitch = self._current_log_pitch
+        yaw = self._current_log_yaw
 
         # 1) Eğer tablo satırı verilmişse oradan okumayı dene
         if row_index is not None:
@@ -1184,13 +1201,14 @@ QGroupBox::title {
                 if 0 <= row_index < table.rowCount():
                     p_item = table.item(row_index, 0)
                     y_item = table.item(row_index, 1)
-                    if p_item is not None:
+                    if pitch is None and p_item is not None:
                         pitch = float(p_item.text())
-                    if y_item is not None:
+                    if yaw is None and y_item is not None:
                         yaw = float(y_item.text())
             except Exception:
-                pitch = None
-                yaw = None
+                # Planner override'ları geçerliyse tablo okuma hatası bunları
+                # silmemeli; eksik değerler aşağıda IMU fallback'ine bırakılır.
+                pass
 
         # 2) Olmadıysa IMU textbox'lardan oku
         if pitch is None and self.ui.pitchLe:
@@ -1446,6 +1464,7 @@ QGroupBox::title {
 
         pitch_d = list(self._planner_result.get("pitch_steps_delta", []))
         yaw_d   = list(self._planner_result.get("yaw_steps_delta",   []))
+        dpy = list(self._planner_result.get("dpy", []))
         if not pitch_d or not yaw_d or len(pitch_d) != len(yaw_d):
             QMessageBox.critical(self, "Hata", "Planner step delta boyutları uyumsuz.")
             return
@@ -1453,6 +1472,9 @@ QGroupBox::title {
         total_seg = len(pitch_d)
         if total_seg == 0:
             QMessageBox.information(self, "Bilgi", "Hiç segment yok.")
+            return
+        if len(dpy) != total_seg + 1:
+            QMessageBox.critical(self, "Hata", "Planner hedef açı listesi uyumsuz.")
             return
 
         # Tüm segmentler bitmişse:
@@ -1470,6 +1492,7 @@ QGroupBox::title {
               f"(orijinal ileri yönde: yaw={yaw_d[i]:+d}, pitch={pitch_d[i]:+d})")
         sys.stdout.flush()
 
+        self._clear_log_target()
         self._move_signed_steps(self.motorX, inv_y)
         self._move_signed_steps(self.motorY, inv_p)
 
@@ -1480,6 +1503,9 @@ QGroupBox::title {
 
         print(f"[MANUAL] segment {i:02d} tamamlandı.")
         sys.stdout.flush()
+
+        _, target_pitch, target_yaw = dpy[i]
+        self._set_log_target(i, target_pitch, target_yaw)
 
         self._scan_step_index += 1
 
@@ -1549,10 +1575,13 @@ QGroupBox::title {
         try:
             pitch_d = list(self._planner_result.get("pitch_steps_delta", []))
             yaw_d   = list(self._planner_result.get("yaw_steps_delta",   []))
+            dpy = list(self._planner_result.get("dpy", []))
             if not pitch_d or not yaw_d or len(pitch_d) != len(yaw_d):
                 raise RuntimeError("Planner step delta boyutları uyumsuz.")
 
             total_seg = len(pitch_d)
+            if len(dpy) != total_seg + 1:
+                raise RuntimeError("Planner hedef açı listesi uyumsuz.")
 
             # --- BAŞLAMADAN ÖNCE: olası kuyrukları temizle ---
             # (stop() genelde kuyruğu iptal eder; motor_control tarafında flush varsa onu çağır.)
@@ -1571,6 +1600,10 @@ QGroupBox::title {
             print(f"İlk hareketten önce bekleme (idle + {wait_s:.3f}s): {wait_s:.3f} s")
             sys.stdout.flush()
 
+            # Create Points sonrasında sistem son seçilen noktadadır.
+            _, start_pitch, start_yaw = dpy[total_seg]
+            self._set_log_target(total_seg, start_pitch, start_yaw)
+
             # 0) İlk girişte bekle: busy ise önce idle, sonra wait_s
             if wait_s > 0:
                 if not self._wait_both_idle(timeout_ms=120000):
@@ -1584,7 +1617,7 @@ QGroupBox::title {
             cum_y = 0
             cum_p = 0
             for i in range(total_seg - 1, -1, -1):
-                self._current_log_row = None
+                self._clear_log_target()
                 inv_y = -int(yaw_d[i])    # YAW → motorX (ters işaret)
                 inv_p = -int(pitch_d[i])  # PITCH → motorY (ters işaret)
 
@@ -1605,6 +1638,9 @@ QGroupBox::title {
                 print(f"            cumulative  yaw={cum_y:+d}  pitch={cum_p:+d}")
                 print("            [idle] iki motor da idle.")
                 sys.stdout.flush()
+
+                _, target_pitch, target_yaw = dpy[i]
+                self._set_log_target(i, target_pitch, target_yaw)
 
                 # Segmentler arası bekleme, sadece idle olduktan sonra başlar
                 if wait_s > 0:
