@@ -99,7 +99,7 @@ QGroupBox::title {
     <set>Qt::AlignCenter</set>
    </property>
    <layout class="QGridLayout" name="gridLayout_3">
-    <item row="4" column="0">
+    <item row="3" column="0">
      <widget class="QGroupBox" name="groupBox_5">
       <property name="font">
        <font>
@@ -164,7 +164,7 @@ QGroupBox::title {
       </layout>
      </widget>
     </item>
-    <item row="2" column="0">
+    <item row="1" column="0">
      <widget class="QGroupBox" name="groupBox_8">
       <property name="font">
        <font>
@@ -224,6 +224,197 @@ QGroupBox::title {
          <property name="text">
           <string>Create Points</string>
          </property>
+        </widget>
+       </item>
+      </layout>
+     </widget>
+    </item>
+    <item row="2" column="0">
+     <widget class="QGroupBox" name="areaScanGb">
+      <property name="font">
+       <font>
+        <bold>true</bold>
+       </font>
+      </property>
+      <property name="title">
+       <string>Area Scan</string>
+      </property>
+      <property name="alignment">
+       <set>Qt::AlignCenter</set>
+      </property>
+      <layout class="QGridLayout" name="areaScanLayout">
+       <item row="0" column="0">
+        <widget class="QPushButton" name="areaSelectAPb">
+         <property name="text">
+          <string>A - Top Left</string>
+         </property>
+        </widget>
+       </item>
+       <item row="0" column="1">
+        <widget class="QPushButton" name="areaSelectBPb">
+         <property name="text">
+          <string>B - Top Right</string>
+         </property>
+        </widget>
+       </item>
+       <item row="1" column="0">
+        <widget class="QPushButton" name="areaSelectDPb">
+         <property name="text">
+          <string>D - Bottom Left</string>
+         </property>
+        </widget>
+       </item>
+       <item row="1" column="1">
+        <widget class="QPushButton" name="areaSelectCPb">
+         <property name="text">
+          <string>C - Bottom Right</string>
+         </property>
+        </widget>
+       </item>
+       <item row="2" column="0">
+        <widget class="QLabel" name="areaXDivLabel">
+         <property name="text">
+          <string>X Divisions:</string>
+         </property>
+        </widget>
+       </item>
+       <item row="2" column="1">
+        <widget class="QSpinBox" name="areaXDivSb">
+         <property name="minimum">
+          <number>1</number>
+         </property>
+         <property name="maximum">
+          <number>100</number>
+         </property>
+         <property name="value">
+          <number>2</number>
+         </property>
+        </widget>
+       </item>
+       <item row="3" column="0">
+        <widget class="QLabel" name="areaYDivLabel">
+         <property name="text">
+          <string>Y Divisions:</string>
+         </property>
+        </widget>
+       </item>
+       <item row="3" column="1">
+        <widget class="QSpinBox" name="areaYDivSb">
+         <property name="minimum">
+          <number>1</number>
+         </property>
+         <property name="maximum">
+          <number>100</number>
+         </property>
+         <property name="value">
+          <number>2</number>
+         </property>
+        </widget>
+       </item>
+       <item row="4" column="0" colspan="2">
+        <widget class="QLabel" name="areaTotalLabel">
+         <property name="text">
+          <string>Generated Points: 9</string>
+         </property>
+         <property name="alignment">
+          <set>Qt::AlignCenter</set>
+         </property>
+        </widget>
+       </item>
+       <item row="5" column="0" colspan="2">
+        <widget class="QPushButton" name="areaCreatePb">
+         <property name="text">
+          <string>Create Area Points</string>
+         </property>
+        </widget>
+       </item>
+      </layout>
+     </widget>
+    </item>
+    <item row="0" column="0">
+     <widget class="QGroupBox" name="groupBox_10">
+      <property name="font">
+       <font>
+        <bold>true</bold>
+       </font>
+      </property>
+      <property name="title">
+       <string>Store Points</string>
+      </property>
+      <property name="alignment">
+       <set>Qt::AlignCenter</set>
+      </property>
+      <layout class="QGridLayout" name="gridLayout_17">
+       <item row="0" column="0">
+        <widget class="QPushButton" name="pbStorePoint">
+         <property name="text">
+          <string>Store Point</string>
+         </property>
+        </widget>
+       </item>
+      </layout>
+     </widget>
+    </item>
+   </layout>
+  </widget>
+  <widget class="QGroupBox" name="pointEditorGb">
+   <property name="geometry">
+    <rect>
+     <x>879</x>
+     <y>0</y>
+     <width>241</width>
+     <height>751</height>
+    </rect>
+   </property>
+   <property name="font">
+    <font>
+     <bold>true</bold>
+    </font>
+   </property>
+   <property name="title">
+    <string>Point Editor</string>
+   </property>
+   <property name="alignment">
+    <set>Qt::AlignCenter</set>
+   </property>
+   <layout class="QGridLayout" name="gridLayout_6">
+    <item row="0" column="0">
+     <widget class="QGroupBox" name="groupBox_7">
+      <property name="font">
+       <font>
+        <bold>true</bold>
+       </font>
+      </property>
+      <property name="title">
+       <string>Target Angles</string>
+      </property>
+      <property name="alignment">
+       <set>Qt::AlignCenter</set>
+      </property>
+      <layout class="QGridLayout" name="gridLayout_5">
+       <item row="0" column="0">
+        <widget class="QTableWidget" name="coordTable">
+         <property name="columnCount">
+          <number>3</number>
+         </property>
+         <attribute name="horizontalHeaderCascadingSectionResizes">
+          <bool>false</bool>
+         </attribute>
+         <column>
+          <property name="text">
+           <string>Pitch</string>
+          </property>
+         </column>
+         <column>
+          <property name="text">
+           <string>Yaw</string>
+          </property>
+         </column>
+         <column>
+          <property name="text">
+           <string>Del</string>
+          </property>
+         </column>
         </widget>
        </item>
       </layout>
@@ -336,197 +527,6 @@ QGroupBox::title {
         <widget class="QPushButton" name="btnDown">
          <property name="text">
           <string>↓</string>
-         </property>
-        </widget>
-       </item>
-      </layout>
-     </widget>
-    </item>
-    <item row="3" column="0">
-     <widget class="QGroupBox" name="groupBox_10">
-      <property name="font">
-       <font>
-        <bold>true</bold>
-       </font>
-      </property>
-      <property name="title">
-       <string>Store Points</string>
-      </property>
-      <property name="alignment">
-       <set>Qt::AlignCenter</set>
-      </property>
-      <layout class="QGridLayout" name="gridLayout_17">
-       <item row="0" column="0">
-        <widget class="QPushButton" name="pbStorePoint">
-         <property name="text">
-          <string>Store Point</string>
-         </property>
-        </widget>
-       </item>
-      </layout>
-     </widget>
-    </item>
-   </layout>
-  </widget>
-  <widget class="QGroupBox" name="pointEditorGb">
-   <property name="geometry">
-    <rect>
-     <x>879</x>
-     <y>0</y>
-     <width>241</width>
-     <height>751</height>
-    </rect>
-   </property>
-   <property name="font">
-    <font>
-     <bold>true</bold>
-    </font>
-   </property>
-   <property name="title">
-    <string>Point Editor</string>
-   </property>
-   <property name="alignment">
-    <set>Qt::AlignCenter</set>
-   </property>
-   <layout class="QGridLayout" name="gridLayout_6">
-    <item row="0" column="0">
-     <widget class="QGroupBox" name="groupBox_7">
-      <property name="font">
-       <font>
-        <bold>true</bold>
-       </font>
-      </property>
-      <property name="title">
-       <string>Target Angles</string>
-      </property>
-      <property name="alignment">
-       <set>Qt::AlignCenter</set>
-      </property>
-      <layout class="QGridLayout" name="gridLayout_5">
-       <item row="0" column="0">
-        <widget class="QTableWidget" name="coordTable">
-         <property name="columnCount">
-          <number>3</number>
-         </property>
-         <attribute name="horizontalHeaderCascadingSectionResizes">
-          <bool>false</bool>
-         </attribute>
-         <column>
-          <property name="text">
-           <string>Pitch</string>
-          </property>
-         </column>
-         <column>
-          <property name="text">
-           <string>Yaw</string>
-          </property>
-         </column>
-         <column>
-          <property name="text">
-           <string>Del</string>
-          </property>
-         </column>
-        </widget>
-       </item>
-      </layout>
-     </widget>
-    </item>
-    <item row="1" column="0">
-     <widget class="QGroupBox" name="areaScanGb">
-      <property name="font">
-       <font>
-        <bold>true</bold>
-       </font>
-      </property>
-      <property name="title">
-       <string>Area Scan</string>
-      </property>
-      <property name="alignment">
-       <set>Qt::AlignCenter</set>
-      </property>
-      <layout class="QGridLayout" name="areaScanLayout">
-       <item row="0" column="0">
-        <widget class="QPushButton" name="areaSelectAPb">
-         <property name="text">
-          <string>A - Top Left</string>
-         </property>
-        </widget>
-       </item>
-       <item row="0" column="1">
-        <widget class="QPushButton" name="areaSelectBPb">
-         <property name="text">
-          <string>B - Top Right</string>
-         </property>
-        </widget>
-       </item>
-       <item row="1" column="0">
-        <widget class="QPushButton" name="areaSelectDPb">
-         <property name="text">
-          <string>D - Bottom Left</string>
-         </property>
-        </widget>
-       </item>
-       <item row="1" column="1">
-        <widget class="QPushButton" name="areaSelectCPb">
-         <property name="text">
-          <string>C - Bottom Right</string>
-         </property>
-        </widget>
-       </item>
-       <item row="2" column="0">
-        <widget class="QLabel" name="areaXDivLabel">
-         <property name="text">
-          <string>X Divisions:</string>
-         </property>
-        </widget>
-       </item>
-       <item row="2" column="1">
-        <widget class="QSpinBox" name="areaXDivSb">
-         <property name="minimum">
-          <number>1</number>
-         </property>
-         <property name="maximum">
-          <number>100</number>
-         </property>
-         <property name="value">
-          <number>2</number>
-         </property>
-        </widget>
-       </item>
-       <item row="3" column="0">
-        <widget class="QLabel" name="areaYDivLabel">
-         <property name="text">
-          <string>Y Divisions:</string>
-         </property>
-        </widget>
-       </item>
-       <item row="3" column="1">
-        <widget class="QSpinBox" name="areaYDivSb">
-         <property name="minimum">
-          <number>1</number>
-         </property>
-         <property name="maximum">
-          <number>100</number>
-         </property>
-         <property name="value">
-          <number>2</number>
-         </property>
-        </widget>
-       </item>
-       <item row="4" column="0" colspan="2">
-        <widget class="QLabel" name="areaTotalLabel">
-         <property name="text">
-          <string>Generated Points: 9</string>
-         </property>
-         <property name="alignment">
-          <set>Qt::AlignCenter</set>
-         </property>
-        </widget>
-       </item>
-       <item row="5" column="0" colspan="2">
-        <widget class="QPushButton" name="areaCreatePb">
-         <property name="text">
-          <string>Create Area Points</string>
          </property>
         </widget>
        </item>

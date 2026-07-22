@@ -90,7 +90,6 @@ class rsdm(QWidget):
 
         # 2) Widget referanslarını bağla
         self.bind_widgets()
-        self.arrange_control_sections()
         # 3) Sinyal/slot bağlantıları
         self.connect_signals()
         # 4) Tablo ayarları
@@ -315,34 +314,6 @@ QGroupBox::title {
 
         self.ui.pbStartLogging = self.w(QPushButton, "pbStartLogging", required=False)
         self.ui.pbStopLogging = self.w(QPushButton, "pbStopLogging", required=False)
-
-    def arrange_control_sections(self):
-        """Place Manual beside the table and stack planning controls in order."""
-        control_panel = self.w(QWidget, "controlPanelGb")
-        point_editor = self.w(QWidget, "pointEditorGb")
-        control_layout = control_panel.layout()
-        point_layout = point_editor.layout()
-
-        manual = self.w(QWidget, "groupBox_4")
-        store = self.w(QWidget, "groupBox_10")
-        sequential = self.w(QWidget, "groupBox_8")
-        area = self.w(QWidget, "areaScanGb")
-        automatic = self.w(QWidget, "groupBox_5")
-
-        control_layout.removeWidget(manual)
-        point_layout.removeWidget(area)
-        manual.setParent(point_editor)
-        area.setParent(control_panel)
-        point_layout.addWidget(manual, 1, 0)
-        point_layout.setRowStretch(0, 1)
-        point_layout.setRowStretch(1, 0)
-
-        for widget in (store, sequential, area, automatic):
-            control_layout.removeWidget(widget)
-        for row, widget in enumerate((store, sequential, area, automatic)):
-            control_layout.addWidget(widget, row, 0)
-            widget.show()
-        manual.show()
 
     def connect_signals(self):
         # Label tıklama
