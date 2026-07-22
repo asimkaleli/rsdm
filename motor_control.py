@@ -150,18 +150,31 @@ class StepperWorker(QObject):
         self._dir_line.set_value(1 if pin_forward else 0)
         time.sleep(0.002)
 
+    @staticmethod
+    def _sleep_until(deadline: float):
+        """Sleep only for the time left until an absolute monotonic deadline.
+
+        Two consecutive ``sleep(edge_s)`` calls accumulate the scheduler
+        overshoot of both calls on every motor step.  Using absolute deadlines
+        lets the low phase absorb normal Python/Linux wake-up latency instead
+        of permanently adding it to the requested step period.
+        """
+        remaining = deadline - time.monotonic()
+        if remaining > 0.0:
+            time.sleep(remaining)
+
     def _pulse_once(self, edge_s: Optional[float] = None):
         pulse_edge_s = self._edge_s if edge_s is None else max(0.0005, float(edge_s))
         pulse_start = time.monotonic()
         self._record_pulse_timing(pulse_start, 2.0 * pulse_edge_s)
         self._step_line.set_value(1)
-        time.sleep(pulse_edge_s)
+        self._sleep_until(pulse_start + pulse_edge_s)
         self._step_line.set_value(0)
-        time.sleep(pulse_edge_s)
         delta = 1 if self._forward else -1
         self._total += 1
         self.progress.emit(self._total)
         self.step.emit(delta)
+        self._sleep_until(pulse_start + 2.0 * pulse_edge_s)
 
     def _reset_timing(self):
         self._timing_count = 0

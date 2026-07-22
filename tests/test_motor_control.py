@@ -4,6 +4,7 @@ import threading
 import time
 import types
 import unittest
+from unittest.mock import patch
 
 
 class _BoundSignal:
@@ -210,6 +211,31 @@ class StepperWorkerTests(unittest.TestCase):
 
         self.assertEqual(logical_steps, [1])
         self.assertEqual(worker._dir_line.values[-1], 0)
+
+    def test_pulse_uses_absolute_edge_deadlines(self):
+        worker = motor_control.StepperWorker(
+            motor_control.MotorPins(step=14, dir=7)
+        )
+        clock = {"now": 10.0}
+        sleep_deadlines = []
+
+        def monotonic():
+            return clock["now"]
+
+        def sleep(seconds):
+            sleep_deadlines.append(seconds)
+            # Simulate 0.2 ms operating-system wake-up latency.  The second
+            # sleep must compensate for it instead of accumulating another
+            # full edge duration.
+            clock["now"] += seconds + 0.0002
+
+        with patch.object(motor_control.time, "monotonic", side_effect=monotonic), \
+             patch.object(motor_control.time, "sleep", side_effect=sleep):
+            worker._pulse_once(edge_s=0.001)
+
+        self.assertAlmostEqual(sleep_deadlines[0], 0.001, places=6)
+        self.assertAlmostEqual(sleep_deadlines[1], 0.0008, places=6)
+        self.assertAlmostEqual(clock["now"], 10.0022, places=6)
 
 
 if __name__ == "__main__":
