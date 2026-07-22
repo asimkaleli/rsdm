@@ -135,6 +135,7 @@ QGroupBox::title {
         self._current_point_row = None
         self._programmatic_motion_active = False
         self._scan_sequence_active = False
+        self._scan_cancel_requested = False
 
         # --- Motorlar ve lazer ---
         try:
@@ -293,6 +294,7 @@ QGroupBox::title {
 
         # --- Tarama UI öğeleri ---
         self.ui.pbScanPoints = self.w(QPushButton, "pbScanPoints", required=False)
+        self.ui.pbEmergencyStop = self.w(QPushButton, "pbEmergencyStop", required=False)
         self.ui.leScanInterval = self.w(QLineEdit,  "leScanInterval", required=False)
         if self.ui.leScanInterval and not self.ui.leScanInterval.text().strip():
             self.ui.leScanInterval.setText("5")  # saniye varsayılan
@@ -331,11 +333,35 @@ QGroupBox::title {
         self.init_speed_combo()
         # Tarama butonu
         self.ui.pbScanPoints.clicked.connect(self.on_scan_points_clicked)
+        self.ui.pbEmergencyStop.clicked.connect(self.on_emergency_stop_clicked)
         # Pitch/Yaw nokta kaydetme (pbStorePoint)
         self.ui.pbStorePoint.clicked.connect(self.on_pb_store_point)
 
         self.ui.pbStartLogging.clicked.connect(self.on_pb_start_logging)
         self.ui.pbStopLogging.clicked.connect(self.on_pb_stop_logging)
+
+    def on_emergency_stop_clicked(self):
+        """Jog ve planlı hareketleri kes; yazılımsal hedef konumunu geçersizleştir."""
+        self._scan_cancel_requested = True
+        self._x_left_pressed = False
+        self._x_right_pressed = False
+        self._y_up_pressed = False
+        self._y_down_pressed = False
+        try:
+            if hasattr(self, "motorX") and self.motorX:
+                self.motorX.emergency_stop()
+            if hasattr(self, "motorY") and self.motorY:
+                self.motorY.emergency_stop()
+        finally:
+            self._mark_position_unknown()
+        print("[EMERGENCY STOP] Motor komutları iptal edildi; konum bilinmiyor.")
+        sys.stdout.flush()
+        QMessageBox.warning(
+            self,
+            "Emergency Stop",
+            "Motor hareketleri durduruldu. Konum artık bilinmiyor; "
+            "devam etmeden önce Store Point veya Create Points ile yeniden referanslayın.",
+        )
 
     # ---------- Tablo ayarı ----------
     def setup_table(self):
@@ -918,7 +944,8 @@ QGroupBox::title {
 
         # Buradan sonra gelen tüm mesafe ölçümleri bu satıra loglanacak
         if wait_s > 0:
-            self._wait_seconds(wait_s)
+            if not self._wait_seconds(wait_s):
+                return False
 
         return True
 
@@ -1002,6 +1029,7 @@ QGroupBox::title {
         """
         if self._scan_sequence_active:
             return
+        self._scan_cancel_requested = False
         table = self.ui.table
 
         # Mevcut mutlak step değerleri
@@ -1253,6 +1281,7 @@ QGroupBox::title {
         """
         if self._scan_sequence_active:
             return
+        self._scan_cancel_requested = False
         if not self.label.pixmap():
             return
 
@@ -1405,6 +1434,7 @@ QGroupBox::title {
         """Bilinen mevcut hedeften bir önceki hedefe (Last → First) git."""
         if self._scan_sequence_active:
             return
+        self._scan_cancel_requested = False
         angle_rows = self._get_angle_rows()
 
         if angle_rows:
@@ -1432,6 +1462,8 @@ QGroupBox::title {
                 sys.stdout.flush()
             else:
                 self._mark_position_unknown()
+                if not self._scan_cancel_requested:
+                    QMessageBox.critical(self, "Tarama Hatası", "Hareket tamamlanamadı.")
             return
 
         if not self._planner_result:
@@ -1479,8 +1511,9 @@ QGroupBox::title {
         self._clear_log_target()
         if not self._move_both_signed_and_wait(inv_y, inv_p, timeout_ms=300000):
             self._mark_position_unknown()
-            QMessageBox.critical(self, "Tarama Hatası",
-                                 f"Segment {i} hareketi tamamlanamadı.")
+            if not self._scan_cancel_requested:
+                QMessageBox.critical(self, "Tarama Hatası",
+                                     f"Segment {i} hareketi tamamlanamadı.")
             return
 
         print(f"[MANUAL] segment {i:02d} tamamlandı.")
@@ -1501,6 +1534,7 @@ QGroupBox::title {
         """
         if self._scan_sequence_active:
             return
+        self._scan_cancel_requested = False
         angle_rows = self._get_angle_rows()
 
         # --- 1) Yeni mod: angle satırlarına göre ---
@@ -1538,8 +1572,9 @@ QGroupBox::title {
                     ok = self._goto_angle_row(row, wait_s=wait_s)
                     if not ok:
                         self._mark_position_unknown()
-                        QMessageBox.critical(self, "Tarama Hatası",
-                                             f"Row {row} noktasına giderken hata oluştu.")
+                        if not self._scan_cancel_requested:
+                            QMessageBox.critical(self, "Tarama Hatası",
+                                                 f"Row {row} noktasına giderken hata oluştu.")
                         return
             finally:
                 self._scan_sequence_active = False
@@ -1601,7 +1636,10 @@ QGroupBox::title {
                     raise RuntimeError("Başlangıçta idle beklerken zaman aşımı.")
                 print(f"[idle] başlangıç idle tamam. {wait_s:.3f}s bekleniyor...")
                 sys.stdout.flush()
-                self._wait_seconds(wait_s)
+                if not self._wait_seconds(wait_s):
+                    self._scan_sequence_active = False
+                    self._clear_log_target()
+                    return
 
             # 1) Planner ileri yönde 0→N segmentleri veriyor.
             #    Biz SON→İLK gideceğimiz için ters sırada ve ters işaretle uygula:
@@ -1619,6 +1657,10 @@ QGroupBox::title {
                 if not self._move_both_signed_and_wait(
                     inv_y, inv_p, timeout_ms=300000
                 ):
+                    if self._scan_cancel_requested:
+                        self._scan_sequence_active = False
+                        self._clear_log_target()
+                        return
                     raise RuntimeError(f"Segment {i} hareketi tamamlanamadı.")
 
                 cum_y += inv_y
@@ -1635,7 +1677,10 @@ QGroupBox::title {
                 if wait_s > 0:
                     print(f"            [wait] {wait_s:.3f}s bekleniyor...")
                     sys.stdout.flush()
-                    self._wait_seconds(wait_s)
+                    if not self._wait_seconds(wait_s):
+                        self._scan_sequence_active = False
+                        self._clear_log_target()
+                        return
 
             self._clear_log_target()
             self._scan_sequence_active = False
@@ -1646,7 +1691,8 @@ QGroupBox::title {
         except Exception as e:
             self._scan_sequence_active = False
             self._mark_position_unknown()
-            QMessageBox.critical(self, "Tarama Hatası", str(e))
+            if not self._scan_cancel_requested:
+                QMessageBox.critical(self, "Tarama Hatası", str(e))
 
     # ---------- Hareket / zaman yardımcıları ----------
     def _move_both_signed_and_wait(self, x_steps: int, y_steps: int,
@@ -1716,12 +1762,15 @@ QGroupBox::title {
         except Exception:
             seconds = 0.0
         if seconds <= 0:
-            return
+            return not self._scan_cancel_requested
         import time as _t
         end = _t.monotonic() + seconds
         while _t.monotonic() < end:
             QApplication.processEvents()
+            if self._scan_cancel_requested:
+                return False
             _t.sleep(0.01)
+        return True
 
     def _parse_seconds(self, txt: str) -> float:
         """'1,5', '1.5', '1 s' vb. girdilerden saniye (float) döndürür."""

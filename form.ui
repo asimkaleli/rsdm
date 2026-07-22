@@ -139,7 +139,23 @@ QGroupBox::title {
          <item row="3" column="0">
           <widget class="QPushButton" name="pbScanPoints">
            <property name="text">
-            <string>Scan Points (Last → First)</string>
+             <string>Scan Points (Last → First)</string>
+           </property>
+          </widget>
+         </item>
+         <item row="4" column="0">
+          <widget class="QPushButton" name="pbEmergencyStop">
+           <property name="minimumSize">
+            <size>
+             <width>0</width>
+             <height>38</height>
+            </size>
+           </property>
+           <property name="styleSheet">
+            <string notr="true">QPushButton { background-color: #b71c1c; color: white; font-weight: bold; } QPushButton:pressed { background-color: #7f0000; }</string>
+           </property>
+           <property name="text">
+            <string>EMERGENCY STOP</string>
            </property>
           </widget>
          </item>

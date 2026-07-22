@@ -165,6 +165,28 @@ class StepperWorkerTests(unittest.TestCase):
         self.assertEqual(result, [(move_id, False)])
         self.assertLess(len(steps), 500)
 
+    def test_emergency_stop_cancels_active_and_queued_moves(self):
+        results = []
+        started = threading.Event()
+        done = threading.Event()
+        self.worker.moveStarted.connect(lambda *_: started.set())
+
+        def on_finished(move_id, completed):
+            results.append((move_id, completed))
+            if len(results) == 2:
+                done.set()
+
+        self.worker.moveFinished.connect(on_finished)
+        first_id = self.worker.submit_move(500)
+        second_id = self.worker.submit_move(-50)
+        self.assertTrue(started.wait(1))
+        self.worker.emergency_stop()
+
+        self.assertTrue(done.wait(1))
+        self.assertEqual(
+            sorted(results), sorted([(first_id, False), (second_id, False)])
+        )
+
     def test_motion_profile_accelerates_and_decelerates(self):
         self.worker._edge_s = 0.0005  # 1000 step/s target
         self.worker._start_sps = 50
