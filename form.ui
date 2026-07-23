@@ -11,14 +11,225 @@
    </rect>
   </property>
   <property name="windowTitle">
-   <string>rsdm</string>
+   <string>RSDM Control</string>
   </property>
   <property name="styleSheet">
    <string notr="true">
+QWidget#rsdm {
+    background-color: #f4f7fb;
+    color: #14213d;
+    font-family: "DejaVu Sans";
+    font-size: 12px;
+}
+
+QGroupBox {
+    background-color: #ffffff;
+    border: 1px solid #d9e2ef;
+    border-radius: 7px;
+    margin-top: 18px;
+    padding-top: 7px;
+    font-weight: 600;
+}
+
 QGroupBox::title {
     subcontrol-origin: margin;
-    subcontrol-position: top center;
-    padding: 0 6px;
+    subcontrol-position: top left;
+    left: 10px;
+    padding: 0 5px;
+    color: #14213d;
+    background-color: transparent;
+}
+
+QGroupBox#imageGb,
+QGroupBox#pointEditorGb,
+QGroupBox#controlPanelGb,
+QGroupBox#measurementGb {
+    background-color: #f8fafc;
+    border-color: #cfd9e7;
+    font-size: 14px;
+}
+
+QGroupBox#groupBox_7,
+QGroupBox#groupBox_4,
+QGroupBox#groupBox_10,
+QGroupBox#groupBox_8,
+QGroupBox#areaScanGb,
+QGroupBox#groupBox_5,
+QGroupBox#groupBox_9,
+QGroupBox#groupBox_11,
+QGroupBox#distanceGb {
+    font-size: 12px;
+}
+
+QPushButton {
+    min-height: 27px;
+    padding: 2px 10px;
+    color: #1e2b44;
+    background-color: #ffffff;
+    border: 1px solid #b9c7da;
+    border-radius: 5px;
+    font-weight: 500;
+}
+
+QPushButton:hover {
+    color: #1261a6;
+    background-color: #f0f7ff;
+    border-color: #4c9be8;
+}
+
+QPushButton:pressed {
+    color: #ffffff;
+    background-color: #1769aa;
+    border-color: #1769aa;
+}
+
+QPushButton:disabled {
+    color: #93a1b4;
+    background-color: #eef2f7;
+    border-color: #d8e0ea;
+}
+
+QPushButton#seqCreatePb,
+QPushButton#areaCreatePb,
+QPushButton#pbScanPoints,
+QPushButton#pbStartLogging {
+    color: #ffffff;
+    background-color: #1976d2;
+    border-color: #1976d2;
+    font-weight: 600;
+}
+
+QPushButton#seqCreatePb:hover,
+QPushButton#areaCreatePb:hover,
+QPushButton#pbScanPoints:hover,
+QPushButton#pbStartLogging:hover {
+    background-color: #1565c0;
+    border-color: #1565c0;
+}
+
+QPushButton#pbStopLogging {
+    color: #c62828;
+    background-color: #ffffff;
+    border-color: #ef5350;
+}
+
+QPushButton#pbStopLogging:hover {
+    color: #ffffff;
+    background-color: #d32f2f;
+    border-color: #d32f2f;
+}
+
+QPushButton#pbEmergencyStop {
+    min-height: 38px;
+    color: #ffffff;
+    background-color: #d71920;
+    border: 1px solid #b81218;
+    border-radius: 5px;
+    font-size: 14px;
+    font-weight: 700;
+}
+
+QPushButton#pbEmergencyStop:hover {
+    background-color: #bd151b;
+}
+
+QPushButton#pbEmergencyStop:pressed {
+    background-color: #941016;
+}
+
+QPushButton#btnUp,
+QPushButton#btnDown,
+QPushButton#btnLeft,
+QPushButton#btnRight {
+    min-width: 43px;
+    min-height: 31px;
+    padding: 0;
+    font-size: 18px;
+    font-weight: 700;
+}
+
+QLineEdit,
+QComboBox,
+QSpinBox {
+    min-height: 27px;
+    padding: 1px 7px;
+    color: #14213d;
+    background-color: #ffffff;
+    border: 1px solid #bdcada;
+    border-radius: 4px;
+    selection-background-color: #1976d2;
+}
+
+QLineEdit:focus,
+QComboBox:focus,
+QSpinBox:focus {
+    border: 1px solid #1976d2;
+}
+
+QLineEdit:read-only {
+    background-color: #f8fafc;
+    color: #24344f;
+}
+
+QLineEdit#yawLe,
+QLineEdit#pitchLe,
+QLineEdit#rollLe,
+QLineEdit#tmpLe {
+    color: #14213d;
+    background-color: #f8fafc;
+    font-size: 13px;
+    font-weight: 700;
+}
+
+QComboBox::drop-down,
+QSpinBox::up-button,
+QSpinBox::down-button {
+    border: 0;
+    background-color: #eef4fb;
+}
+
+QTableWidget {
+    color: #1e2b44;
+    background-color: #ffffff;
+    alternate-background-color: #f7faff;
+    border: 1px solid #cbd6e4;
+    border-radius: 4px;
+    gridline-color: #e1e7ef;
+    selection-color: #ffffff;
+    selection-background-color: #1976d2;
+}
+
+QHeaderView::section {
+    min-height: 28px;
+    padding: 3px 5px;
+    color: #263752;
+    background-color: #edf3fa;
+    border: 0;
+    border-right: 1px solid #d5dfeb;
+    border-bottom: 1px solid #cbd6e4;
+    font-weight: 600;
+}
+
+QCheckBox {
+    spacing: 7px;
+    color: #27364e;
+}
+
+QCheckBox::indicator {
+    width: 15px;
+    height: 15px;
+}
+
+QLabel#areaTotalLabel,
+QLabel#seqTotalLabel {
+    color: #42526b;
+    font-weight: 600;
+}
+
+QLabel#imageLabel {
+    background-color: #000000;
+    border: 1px solid #111827;
+    border-radius: 5px;
 }
    </string>
   </property>
@@ -37,7 +248,7 @@ QGroupBox::title {
     </font>
    </property>
    <property name="title">
-    <string>Image</string>
+    <string>Live Camera</string>
    </property>
    <property name="alignment">
     <set>Qt::AlignCenter</set>
@@ -69,10 +280,6 @@ QGroupBox::title {
       <height>480</height>
      </size>
     </property>
-    <property name="styleSheet">
-     <string notr="true">border: 2px solid black;
-</string>
-    </property>
     <property name="text">
      <string/>
     </property>
@@ -93,7 +300,7 @@ QGroupBox::title {
     </font>
    </property>
    <property name="title">
-    <string>Control Panel</string>
+    <string>Scan Control</string>
    </property>
    <property name="alignment">
     <set>Qt::AlignCenter</set>
@@ -107,7 +314,7 @@ QGroupBox::title {
        </font>
       </property>
       <property name="title">
-       <string>Automatic</string>
+       <string>Automatic Scan</string>
       </property>
       <property name="alignment">
        <set>Qt::AlignCenter</set>
@@ -151,9 +358,6 @@ QGroupBox::title {
              <height>38</height>
             </size>
            </property>
-           <property name="styleSheet">
-            <string notr="true">QPushButton { background-color: #b71c1c; color: white; font-weight: bold; } QPushButton:pressed { background-color: #7f0000; }</string>
-           </property>
            <property name="text">
             <string>EMERGENCY STOP</string>
            </property>
@@ -172,7 +376,7 @@ QGroupBox::title {
        </font>
       </property>
       <property name="title">
-       <string>Add Sequential Points</string>
+       <string>Sequential Scan</string>
       </property>
       <property name="alignment">
        <set>Qt::AlignCenter</set>
@@ -339,7 +543,7 @@ QGroupBox::title {
        </font>
       </property>
       <property name="title">
-       <string>Store Points</string>
+       <string>Point Capture</string>
       </property>
       <property name="alignment">
        <set>Qt::AlignCenter</set>
@@ -372,7 +576,7 @@ QGroupBox::title {
     </font>
    </property>
    <property name="title">
-    <string>Point Editor</string>
+    <string>Motion &amp; Targets</string>
    </property>
    <property name="alignment">
     <set>Qt::AlignCenter</set>
@@ -428,7 +632,7 @@ QGroupBox::title {
        </font>
       </property>
       <property name="title">
-       <string>Manual</string>
+       <string>Manual Motion</string>
       </property>
       <property name="alignment">
        <set>Qt::AlignCenter</set>
@@ -595,7 +799,7 @@ QGroupBox::title {
          <item row="4" column="1">
           <widget class="QLabel" name="label_9">
            <property name="text">
-            <string>Interval</string>
+            <string>Interval (ms)</string>
            </property>
           </widget>
          </item>
@@ -609,7 +813,7 @@ QGroupBox::title {
          <item row="2" column="1">
           <widget class="QLabel" name="label_7">
            <property name="text">
-            <string>Interval</string>
+            <string>Interval (ms)</string>
            </property>
           </widget>
          </item>
@@ -624,7 +828,7 @@ QGroupBox::title {
        <item row="0" column="0">
         <widget class="QCheckBox" name="cbLazerActivate">
          <property name="text">
-          <string>Activate Lazer</string>
+          <string>Activate Laser</string>
          </property>
         </widget>
        </item>
@@ -655,7 +859,14 @@ QGroupBox::title {
           </widget>
          </item>
          <item row="0" column="1">
-          <widget class="QLineEdit" name="yawLe"/>
+          <widget class="QLineEdit" name="yawLe">
+           <property name="alignment">
+            <set>Qt::AlignRight|Qt::AlignTrailing|Qt::AlignVCenter</set>
+           </property>
+           <property name="readOnly">
+            <bool>true</bool>
+           </property>
+          </widget>
          </item>
          <item row="1" column="0">
           <widget class="QLabel" name="label">
@@ -665,7 +876,14 @@ QGroupBox::title {
           </widget>
          </item>
          <item row="1" column="1">
-          <widget class="QLineEdit" name="pitchLe"/>
+          <widget class="QLineEdit" name="pitchLe">
+           <property name="alignment">
+            <set>Qt::AlignRight|Qt::AlignTrailing|Qt::AlignVCenter</set>
+           </property>
+           <property name="readOnly">
+            <bool>true</bool>
+           </property>
+          </widget>
          </item>
          <item row="2" column="0">
           <widget class="QLabel" name="Roll">
@@ -675,17 +893,31 @@ QGroupBox::title {
           </widget>
          </item>
          <item row="2" column="1">
-          <widget class="QLineEdit" name="rollLe"/>
+          <widget class="QLineEdit" name="rollLe">
+           <property name="alignment">
+            <set>Qt::AlignRight|Qt::AlignTrailing|Qt::AlignVCenter</set>
+           </property>
+           <property name="readOnly">
+            <bool>true</bool>
+           </property>
+          </widget>
          </item>
          <item row="3" column="0">
           <widget class="QLabel" name="label_4">
            <property name="text">
-            <string>Temp:</string>
+            <string>Temperature:</string>
            </property>
           </widget>
          </item>
          <item row="3" column="1">
-          <widget class="QLineEdit" name="tmpLe"/>
+          <widget class="QLineEdit" name="tmpLe">
+           <property name="alignment">
+            <set>Qt::AlignRight|Qt::AlignTrailing|Qt::AlignVCenter</set>
+           </property>
+           <property name="readOnly">
+            <bool>true</bool>
+           </property>
+          </widget>
          </item>
         </layout>
        </item>
