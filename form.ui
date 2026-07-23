@@ -7,7 +7,7 @@
     <x>0</x>
     <y>0</y>
     <width>1638</width>
-    <height>754</height>
+    <height>850</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -59,6 +59,19 @@ QGroupBox#groupBox_9,
 QGroupBox#groupBox_11,
 QGroupBox#distanceGb {
     font-size: 12px;
+}
+
+QGroupBox#groupBox_7::title,
+QGroupBox#groupBox_4::title,
+QGroupBox#groupBox_10::title,
+QGroupBox#groupBox_8::title,
+QGroupBox#areaScanGb::title,
+QGroupBox#groupBox_5::title,
+QGroupBox#groupBox_9::title,
+QGroupBox#groupBox_11::title,
+QGroupBox#distanceGb::title {
+    font-size: 13px;
+    font-weight: 700;
 }
 
 QPushButton {
@@ -148,6 +161,15 @@ QPushButton#btnRight {
     font-weight: 700;
 }
 
+QPushButton#areaSelectAPb,
+QPushButton#areaSelectBPb,
+QPushButton#areaSelectCPb,
+QPushButton#areaSelectDPb {
+    min-height: 25px;
+    padding: 1px 3px;
+    font-size: 10px;
+}
+
 QLineEdit,
 QComboBox,
 QSpinBox {
@@ -177,8 +199,9 @@ QLineEdit#rollLe,
 QLineEdit#tmpLe {
     color: #14213d;
     background-color: #f8fafc;
-    font-size: 13px;
-    font-weight: 700;
+    font-family: "DejaVu Sans";
+    font-size: 12px;
+    font-weight: 600;
 }
 
 QComboBox::drop-down,
@@ -215,6 +238,12 @@ QCheckBox {
     color: #27364e;
 }
 
+QGroupBox#distanceGb QCheckBox,
+QGroupBox#distanceGb QLabel {
+    spacing: 4px;
+    font-size: 11px;
+}
+
 QCheckBox::indicator {
     width: 15px;
     height: 15px;
@@ -239,7 +268,7 @@ QLabel#imageLabel {
      <x>0</x>
      <y>0</y>
      <width>878</width>
-     <height>751</height>
+     <height>847</height>
     </rect>
    </property>
    <property name="font">
@@ -257,7 +286,7 @@ QLabel#imageLabel {
     <property name="geometry">
      <rect>
       <x>12</x>
-      <y>135</y>
+      <y>183</y>
       <width>854</width>
       <height>480</height>
      </rect>
@@ -291,7 +320,7 @@ QLabel#imageLabel {
      <x>1120</x>
      <y>0</y>
      <width>251</width>
-     <height>751</height>
+     <height>847</height>
     </rect>
    </property>
    <property name="font">
@@ -567,7 +596,7 @@ QLabel#imageLabel {
      <x>879</x>
      <y>0</y>
      <width>241</width>
-     <height>751</height>
+     <height>847</height>
     </rect>
    </property>
    <property name="font">
@@ -576,7 +605,7 @@ QLabel#imageLabel {
     </font>
    </property>
    <property name="title">
-    <string>Motion &amp; Targets</string>
+    <string>Motion and Targets</string>
    </property>
    <property name="alignment">
     <set>Qt::AlignCenter</set>
@@ -745,7 +774,7 @@ QLabel#imageLabel {
      <x>1372</x>
      <y>0</y>
      <width>261</width>
-     <height>751</height>
+     <height>847</height>
     </rect>
    </property>
    <property name="font">
@@ -792,28 +821,28 @@ QLabel#imageLabel {
          <item row="0" column="0">
           <widget class="QCheckBox" name="cbManualMeasure">
            <property name="text">
-            <string>Manual Measuring</string>
+            <string>Manual Measure</string>
            </property>
           </widget>
          </item>
          <item row="4" column="1">
           <widget class="QLabel" name="label_9">
            <property name="text">
-            <string>Interval (ms)</string>
+            <string>Interval</string>
            </property>
           </widget>
          </item>
          <item row="4" column="0">
           <widget class="QCheckBox" name="cbModeDistance">
            <property name="text">
-            <string>Distance Measure</string>
+            <string>Distance</string>
            </property>
           </widget>
          </item>
          <item row="2" column="1">
           <widget class="QLabel" name="label_7">
            <property name="text">
-            <string>Interval (ms)</string>
+            <string>Interval</string>
            </property>
           </widget>
          </item>
