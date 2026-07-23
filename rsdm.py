@@ -65,6 +65,7 @@ class rsdm(QWidget):
     # this start speed using the configured acceleration.
     MOTOR_START_SPS = 50.0
     MOTOR_ACCELERATION_SPS2 = 400.0
+    DISTANCE_MIN_FRESHNESS_S = 2.0
 
     def __init__(self):
         super(rsdm, self).__init__()
@@ -76,6 +77,7 @@ class rsdm(QWidget):
 
         # --- Dimetix ölçüm worker ---
         self._last_distance = None            # anlık ölçüm (m ya da mm → stringte birim var)
+        self._last_distance_received_at = None
         self._first_distance = None           # Select First'te yakalanan
         self._last_distance_at_select = None  # Select Last'ta yakalanan
 
@@ -400,10 +402,13 @@ QGroupBox::title {
 
     # ---------- Dimetix callbacks ----------
     def _on_dim_distance(self, value: float, unit: str):
+        if self.ui.cbLazer and not self.ui.cbLazer.isChecked():
+            return
         if self.ui.cbModeDistance and not self.ui.cbModeDistance.isChecked():
             return
 
         self._last_distance = float(value)
+        self._last_distance_received_at = time.monotonic()
         self._last_distance_unit = unit or ""
 
         if self.ui.leDistance:
@@ -472,8 +477,51 @@ QGroupBox::title {
     def _on_dim_error(self, msg: str):
         print(f"Hata: {msg}")
 
+    def _distance_max_age_seconds(self) -> float:
+        """Allow a few measurement periods, with a safe lower bound."""
+        interval_ms = 500
+        if self.ui.leDistanceInterval:
+            text = self.ui.leDistanceInterval.text().strip()
+            if text.isdigit():
+                interval_ms = max(1, int(text))
+        return max(
+            float(self.DISTANCE_MIN_FRESHNESS_S),
+            3.0 * interval_ms / 1000.0,
+        )
+
+    def _fresh_distance_measurement(self):
+        """Return the current (distance, unit), or None when it is not usable."""
+        if self.ui.cbLazer and not self.ui.cbLazer.isChecked():
+            return None
+        if self.ui.cbModeDistance and not self.ui.cbModeDistance.isChecked():
+            return None
+        if self._last_distance is None or self._last_distance_received_at is None:
+            return None
+        age = time.monotonic() - float(self._last_distance_received_at)
+        if age < 0.0 or age > self._distance_max_age_seconds():
+            return None
+        return float(self._last_distance), self._last_distance_unit or ""
+
+    def _invalidate_distance_selections(self):
+        """Discard measurements/selections that must not survive laser-off."""
+        self._last_distance = None
+        self._last_distance_received_at = None
+        self._last_distance_unit = ""
+        self._first_distance = None
+        self._last_distance_at_select = None
+        self._track_steps = False
+
+        if hasattr(self, "label") and self.label:
+            self.label.clear_selection()
+        if hasattr(self, "ui"):
+            self._reset_sequential_selection_labels()
+        if hasattr(self, "_area_corners"):
+            self._reset_area_selection()
+
     # ---------- Lazer ve mod seçimleri ----------
     def on_laser_toggled(self, checked: bool):
+        if not checked:
+            self._invalidate_distance_selections()
         try:
             if hasattr(self, "laser") and self.laser:
                 self.laser.set_enabled(checked)
@@ -984,6 +1032,14 @@ QGroupBox::title {
     def on_select_first_clicked(self):
         if self._scan_sequence_active:
             return
+        measurement = self._fresh_distance_measurement()
+        if measurement is None:
+            QMessageBox.warning(
+                self,
+                "Sequential Scan",
+                "İlk noktayı seçmek için lazeri açın ve güncel bir mesafe ölçümü bekleyin.",
+            )
+            return
         self._reset_area_selection()
         self._reset_sequential_selection_labels()
         self.label.start_select_first()
@@ -991,15 +1047,23 @@ QGroupBox::title {
         self._track_steps = True
         self._planner_result = None
         # O anki D'yi yakala
-        self._first_distance = self._last_distance
+        self._first_distance = measurement[0]
 
     def on_select_last_clicked(self):
         if self._scan_sequence_active:
             return
+        measurement = self._fresh_distance_measurement()
+        if measurement is None:
+            QMessageBox.warning(
+                self,
+                "Sequential Scan",
+                "Son noktayı seçmek için lazeri açın ve güncel bir mesafe ölçümü bekleyin.",
+            )
+            return
         self.label.start_select_last()
         self._track_steps = False
         # O anki D'yi yakala
-        self._last_distance_at_select = self._last_distance
+        self._last_distance_at_select = measurement[0]
 
     def _update_sequential_total(self, *_):
         total = int(self.ui.countSpin.value()) + 1
@@ -1047,8 +1111,12 @@ QGroupBox::title {
         if self.motorX.is_busy() or self.motorY.is_busy():
             QMessageBox.warning(self, "Area Scan", "Köşeyi seçmeden önce motorun durmasını bekleyin.")
             return
-        if self._last_distance is None:
-            QMessageBox.warning(self, "Area Scan", "Bu köşe için geçerli mesafe ölçümü yok.")
+        if self._fresh_distance_measurement() is None:
+            QMessageBox.warning(
+                self,
+                "Area Scan",
+                "Köşeyi seçmek için lazeri açın ve güncel bir mesafe ölçümü bekleyin.",
+            )
             return
         if corner == "A":
             self._reset_area_selection()
@@ -1067,10 +1135,15 @@ QGroupBox::title {
         if not mode.startswith("area:"):
             return
         corner = mode.split(":", 1)[1]
-        if self._last_distance is None:
+        measurement = self._fresh_distance_measurement()
+        if measurement is None:
             self.label.area_points.pop(corner, None)
             self.label.update()
-            QMessageBox.warning(self, "Area Scan", "Köşe kaydedilemedi: mesafe ölçümü yok.")
+            QMessageBox.warning(
+                self,
+                "Area Scan",
+                "Köşe kaydedilemedi: lazer açık değil veya güncel mesafe ölçümü yok.",
+            )
             return
         if self.motorX.is_busy() or self.motorY.is_busy():
             self.label.area_points.pop(corner, None)
@@ -1082,8 +1155,8 @@ QGroupBox::title {
             "pixel": (int(x), int(y)),
             "steps_x": int(self._steps_x_abs),
             "steps_y": int(self._steps_y_abs),
-            "distance": float(self._last_distance),
-            "unit": self._last_distance_unit or "",
+            "distance": measurement[0],
+            "unit": measurement[1],
         }
         self._area_button(corner).setText(f"{corner} Selected")
         self._planner_result = None
@@ -1614,9 +1687,17 @@ QGroupBox::title {
         dYaw_deg = dx_steps * deg_per_step_x
         dPitch_deg = dy_steps * deg_per_step_y
 
-        # D1/D2: Dimetix'ten; yoksa varsayılan
-        D1 = self._first_distance if self._first_distance is not None else 1000.0
-        D2 = self._last_distance_at_select if self._last_distance_at_select is not None else D1
+        # D1/D2 yalnızca seçim anında alınmış geçerli Dimetix ölçümleridir.
+        if self._first_distance is None or self._last_distance_at_select is None:
+            QMessageBox.warning(
+                self,
+                "Sequential Scan",
+                "İlk ve son nokta için geçerli mesafe ölçümü bulunmuyor. "
+                "Lazeri açıp iki noktayı yeniden seçin.",
+            )
+            return
+        D1 = float(self._first_distance)
+        D2 = float(self._last_distance_at_select)
 
         print("\n=== plan_laser_path GİRDİ ===")
         print(f"D1={D1:.3f}, Pitch_1=0.000, Yaw_1=0.000")

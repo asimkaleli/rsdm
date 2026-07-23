@@ -46,7 +46,7 @@ QGroupBox#controlPanelGb,
 QGroupBox#measurementGb {
     background-color: #f8fafc;
     border-color: #cfd9e7;
-    font-size: 14px;
+    font-size: 16px;
 }
 
 QGroupBox#groupBox_7,
@@ -70,7 +70,7 @@ QGroupBox#groupBox_5::title,
 QGroupBox#groupBox_9::title,
 QGroupBox#groupBox_11::title,
 QGroupBox#distanceGb::title {
-    font-size: 13px;
+    font-size: 14px;
     font-weight: 700;
 }
 
@@ -204,13 +204,6 @@ QLineEdit#tmpLe {
     font-weight: 600;
 }
 
-QComboBox::drop-down,
-QSpinBox::up-button,
-QSpinBox::down-button {
-    border: 0;
-    background-color: #eef4fb;
-}
-
 QTableWidget {
     color: #1e2b44;
     background-color: #ffffff;
@@ -230,6 +223,7 @@ QHeaderView::section {
     border: 0;
     border-right: 1px solid #d5dfeb;
     border-bottom: 1px solid #cbd6e4;
+    font-size: 13px;
     font-weight: 600;
 }
 
