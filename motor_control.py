@@ -305,7 +305,12 @@ class StepperWorker(QObject):
                 if self._active_move is not None or self._moves:
                     self.error.emit("Planli hareket aktifken jog reddedildi.")
                 else:
-                    self._jog_forward = bool(args[0])
+                    requested_forward = bool(args[0])
+                    # Keyboard repeat or duplicate UI press events must not
+                    # restart the acceleration profile of an active jog.
+                    if self._jog and self._jog_forward == requested_forward:
+                        continue
+                    self._jog_forward = requested_forward
                     self._jog_steps = 0
                     self._reset_timing()
                     self._jog = True

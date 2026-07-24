@@ -23,14 +23,13 @@ from PySide2.QtWidgets import (
     QComboBox, QStyle
 )
 from PySide2.QtGui import QIcon
-from PySide2.QtCore import QFile, Qt, QCoreApplication, QTimer, QThread, QSize
+from PySide2.QtCore import QFile, Qt, QCoreApplication, QTimer, QSize
 from PySide2.QtUiTools import QUiLoader
 
 # --- Ayrı modüller ---
 from camera_controller import CameraController
 from clickable_label import ClickableLabel
 from dimetix_worker import DimetixWorker
-from dimetix import close_port
 from laser_gpio import LaserGPIO
 
 from orientation import OrientationWorker
@@ -47,10 +46,6 @@ T = TypeVar("T")
 
 class rsdm(QWidget):
     # ----------- KALİBRASYON (kendine göre güncelle) -----------
-    # Görsel kısım için piksel→adım dursun ama kullanılmıyor (planlayıcı kullanıyoruz)
-    PIXEL_TO_STEP_X = 0.0
-    PIXEL_TO_STEP_Y = 0.0
-
     # Mekanik parametreler (her eksen için ayrı)
     # Not: planlayıcı StepperConfig(step_angle_deg, microstep_div, gear_ratio) bekliyor.
     STEP_ANGLE_DEG_X = 1.8
@@ -114,15 +109,11 @@ QGroupBox::title {
         self.cam.start()
 
         # --- IMU ---
-        self.ori_thread = QThread(self)
         self.ori_worker = OrientationWorker(i2c_addr=0x68, hz=50, use_mag=True,
                                             yaw_alpha=0.6, declination_deg=6.0)
-        self.ori_worker.moveToThread(self.ori_thread)
-        self.ori_thread.started.connect(self.ori_worker.start)
         self.ori_worker.orientation.connect(self.on_orientation)
         self.ori_worker.error.connect(lambda m: QMessageBox.critical(self, "IMU Hatası", m))
-        self.ori_worker.finished.connect(self.ori_thread.quit)
-        self.ori_thread.start()
+        self.ori_worker.start()
 
         # --- Motor step sayaçları (mutlak + referans için) ---
         self._steps_x_abs = 0   # motorX (Yaw) mutlak step sayacı
@@ -353,7 +344,7 @@ QGroupBox::title {
         self.ui.cbLazer.toggled.connect(self.on_laser_toggled)
         self.ui.cbManualMeasure.toggled.connect(self.on_manual_measure_select)
         self.ui.cbModeDistance.toggled.connect(self.on_mode_distance_select)
-        self.ui.cbModeDistance.setChecked(True)
+        self.ui.cbModeDistance.setChecked(False)
         self.ui.cbModeSignalQuality.toggled.connect(self.on_signal_quality_select)
         # Hız combobox
         self.init_speed_combo()
@@ -379,6 +370,18 @@ QGroupBox::title {
             if hasattr(self, "motorY") and self.motorY:
                 self.motorY.emergency_stop()
         finally:
+            self._planner_result = None
+            self._origin_steps_x = None
+            self._origin_steps_y = None
+            self._origin_angle_row = None
+            self._first_distance = None
+            self._last_distance_at_select = None
+            self._track_steps = False
+            self._awaiting_marker_click = False
+            self._last_store_row = None
+            self.label.clear_selection()
+            self._reset_sequential_selection_labels()
+            self._reset_area_selection()
             self._mark_position_unknown()
         print("[EMERGENCY STOP] Motor komutları iptal edildi; konum bilinmiyor.")
         sys.stdout.flush()
@@ -386,7 +389,9 @@ QGroupBox::title {
             self,
             "Emergency Stop",
             "Motor hareketleri durduruldu. Konum artık bilinmiyor; "
-            "devam etmeden önce Store Point veya Create Points ile yeniden referanslayın.",
+            "mevcut hedefler yeniden kullanılmayacak. Store Point serisinde eski "
+            "satırları silip yeniden referans belirleyin; Sequential/Area "
+            "noktalarını ise yeniden seçin.",
         )
 
     # ---------- Tablo ayarı ----------
@@ -518,6 +523,26 @@ QGroupBox::title {
         if hasattr(self, "_area_corners"):
             self._reset_area_selection()
 
+    def _start_dimetix_if_requested(self):
+        """Start after the laser warm-up delay only if it is still requested."""
+        if not self.ui.cbLazer or not self.ui.cbLazer.isChecked():
+            return
+        if not self.dim_worker.isRunning():
+            self.dim_worker.start()
+
+    def _stop_dimetix_worker(self, timeout_ms: int = 3000) -> bool:
+        """Request a cooperative stop; the worker closes its own serial port."""
+        if not self.dim_worker:
+            return True
+        self.dim_worker.stop()
+        if not self.dim_worker.isRunning():
+            return True
+        stopped = self.dim_worker.wait(max(1, int(timeout_ms)))
+        if not stopped:
+            print("[Dimetix] Worker belirtilen sürede durmadı.")
+            sys.stdout.flush()
+        return bool(stopped)
+
     # ---------- Lazer ve mod seçimleri ----------
     def on_laser_toggled(self, checked: bool):
         if not checked:
@@ -535,30 +560,30 @@ QGroupBox::title {
 
         try:
             if checked:
-                if not self.dim_worker.isRunning():
-                    QTimer.singleShot(1500, lambda: self.dim_worker.start())
+                if self.ui.cbModeDistance and not self.ui.cbModeDistance.isChecked():
+                    self.ui.cbModeDistance.setChecked(True)
+                QTimer.singleShot(1500, self._start_dimetix_if_requested)
 
                 self.ui.leManualMeasure.setEnabled(False)
             else:
-                if self.dim_worker.isRunning():
-                    self.dim_worker.stop()
-                    self.dim_worker.wait(1000)
-                    if self.dim_worker.ser:
-                        close_port(self.dim_worker.ser)
-                        self.dim_worker.ser = None
-
-                    self.dim_worker.stop_auto_distance()
-                    self.dim_worker.set_mode_off()
-                    self.ui.leDistance.setText("--")
-                    self.ui.leSignalQuality.setText("--")
-                    self.ui.cbModeDistance.setChecked(False)
-                    self.ui.cbModeSignalQuality.setChecked(False)
-                    self.ui.leManualMeasure.setEnabled(True)
+                self.dim_worker.set_mode_off()
+                self._stop_dimetix_worker()
+                self.ui.leDistance.setText("--")
+                self.ui.leSignalQuality.setText("--")
+                self.ui.cbModeDistance.setChecked(False)
+                self.ui.cbModeSignalQuality.setChecked(False)
+                self.ui.leManualMeasure.setEnabled(True)
         except Exception as e:
             QMessageBox.critical(self, "Dimetix Worker", str(e))
 
     def on_mode_distance_select(self, checked: bool):
         if checked:
+            if self.ui.cbLazer and not self.ui.cbLazer.isChecked():
+                self.ui.cbModeDistance.blockSignals(True)
+                self.ui.cbModeDistance.setChecked(False)
+                self.ui.cbModeDistance.blockSignals(False)
+                self.dim_worker.set_mode_off()
+                return
             self.ui.cbModeSignalQuality.setChecked(False)
 
             # interval'i lineEdit'ten al
@@ -571,6 +596,9 @@ QGroupBox::title {
             self.dim_worker.set_mode_distance()
 
         else:
+            self._last_distance = None
+            self._last_distance_received_at = None
+            self._last_distance_unit = ""
             self.dim_worker.stop_auto_distance()
             self.dim_worker.set_mode_off()
             if self.ui.leDistance:
@@ -578,6 +606,12 @@ QGroupBox::title {
 
     def on_signal_quality_select(self, checked: bool):
         if checked:
+            if self.ui.cbLazer and not self.ui.cbLazer.isChecked():
+                self.ui.cbModeSignalQuality.blockSignals(True)
+                self.ui.cbModeSignalQuality.setChecked(False)
+                self.ui.cbModeSignalQuality.blockSignals(False)
+                self.dim_worker.set_mode_off()
+                return
             self.ui.cbModeDistance.setChecked(False)
 
             txt = self.ui.leSignalInterval.text().strip()
@@ -628,21 +662,29 @@ QGroupBox::title {
         key = event.key()
 
         if key == Qt.Key_Right:
-            self._x_right_pressed = True
-            self._x_last_dir = "right"
-            self._update_x_from_keys()
+            if not self._x_right_pressed:
+                self._x_right_pressed = True
+                self._x_last_dir = "right"
+                self._update_x_from_keys()
+            event.accept()
         elif key == Qt.Key_Left:
-            self._x_left_pressed = True
-            self._x_last_dir = "left"
-            self._update_x_from_keys()
+            if not self._x_left_pressed:
+                self._x_left_pressed = True
+                self._x_last_dir = "left"
+                self._update_x_from_keys()
+            event.accept()
         elif key == Qt.Key_Up:
-            self._y_up_pressed = True
-            self._y_last_dir = "up"
-            self._update_y_from_keys()
+            if not self._y_up_pressed:
+                self._y_up_pressed = True
+                self._y_last_dir = "up"
+                self._update_y_from_keys()
+            event.accept()
         elif key == Qt.Key_Down:
-            self._y_down_pressed = True
-            self._y_last_dir = "down"
-            self._update_y_from_keys()
+            if not self._y_down_pressed:
+                self._y_down_pressed = True
+                self._y_last_dir = "down"
+                self._update_y_from_keys()
+            event.accept()
         else:
             super(rsdm, self).keyPressEvent(event)
 
@@ -653,17 +695,25 @@ QGroupBox::title {
         key = event.key()
 
         if key == Qt.Key_Right:
-            self._x_right_pressed = False
-            self._update_x_from_keys()
+            if self._x_right_pressed:
+                self._x_right_pressed = False
+                self._update_x_from_keys()
+            event.accept()
         elif key == Qt.Key_Left:
-            self._x_left_pressed = False
-            self._update_x_from_keys()
+            if self._x_left_pressed:
+                self._x_left_pressed = False
+                self._update_x_from_keys()
+            event.accept()
         elif key == Qt.Key_Up:
-            self._y_up_pressed = False
-            self._update_y_from_keys()
+            if self._y_up_pressed:
+                self._y_up_pressed = False
+                self._update_y_from_keys()
+            event.accept()
         elif key == Qt.Key_Down:
-            self._y_down_pressed = False
-            self._update_y_from_keys()
+            if self._y_down_pressed:
+                self._y_down_pressed = False
+                self._update_y_from_keys()
+            event.accept()
         else:
             super(rsdm, self).keyReleaseEvent(event)
 
@@ -1386,6 +1436,18 @@ QGroupBox::title {
         sy = self._steps_y_abs   # MotorY → Pitch
 
         angle_rows = self._get_angle_rows()
+        if not angle_rows and table.rowCount() > 0:
+            # Sequential/Area hedefleri ile Store Point satırlarını aynı
+            # tabloda karıştırma; Store Point yeni bir açı serisi başlatır.
+            table.setRowCount(0)
+            self.label.markers.clear()
+            self.label.first_point = None
+            self.label.last_point = None
+            self.label.update()
+            self._planner_result = None
+            self._reset_sequential_selection_labels()
+            self._reset_area_selection()
+            angle_rows = []
         is_new_series = not angle_rows
 
         # --- 1) Hiç angle satırı yoksa: ilk nokta (referans) ---
@@ -1492,9 +1554,17 @@ QGroupBox::title {
             QMessageBox.critical(self, "Log", f"Dosya açılamadı:\n{e}")
             return
 
-        # Dosya boşsa başlık satırı yaz
-        if f.tell() == 0:
+        try:
+            # Dosya "w" modunda açıldığı için her yeni log başlıkla başlar.
             f.write("row,pitch_deg,yaw_deg,distance,unit,timestamp\n")
+            f.flush()
+        except Exception as e:
+            try:
+                f.close()
+            except Exception:
+                pass
+            QMessageBox.critical(self, "Log", f"Dosya başlatılamadı:\n{e}")
+            return
 
         self._log_file = f
         self._log_path = path
@@ -1502,22 +1572,32 @@ QGroupBox::title {
 
         QMessageBox.information(self, "Log", f"Loglama başlatıldı:\n{path}")
 
+    def _close_log_file(self):
+        """Close the active log exactly once, including after write errors."""
+        self._logging_enabled = False
+        log_file = self._log_file
+        self._log_file = None
+        self._log_path = None
+        if not log_file:
+            return
+        try:
+            log_file.flush()
+        except Exception:
+            pass
+        try:
+            log_file.close()
+        except Exception:
+            pass
+
     def on_pb_stop_logging(self):
         """
         Stop Log:
         - Loglamayı kapatır, dosyayı flush + close yapar.
         """
-        if not self._logging_enabled:
+        if not self._logging_enabled and not self._log_file:
             return
 
-        self._logging_enabled = False
-        if self._log_file:
-            try:
-                self._log_file.flush()
-                self._log_file.close()
-            except Exception:
-                pass
-        self._log_file = None
+        self._close_log_file()
 
         QMessageBox.information(self, "Log", "Loglama durduruldu.")
 
@@ -1614,7 +1694,7 @@ QGroupBox::title {
             self._log_file.write(line)
             self._log_file.flush()
         except Exception as e:
-            self._logging_enabled = False
+            self._close_log_file()
             QMessageBox.critical(
                 self,
                 "Log Hatası",
@@ -2200,22 +2280,24 @@ QGroupBox::title {
             pass
 
     def closeEvent(self, e):
+        self._scan_cancel_requested = True
+        self._x_left_pressed = False
+        self._x_right_pressed = False
+        self._y_up_pressed = False
+        self._y_down_pressed = False
+        self._safe(lambda: self.motorX and self.motorX.emergency_stop())
+        self._safe(lambda: self.motorY and self.motorY.emergency_stop())
+        self._safe(self._close_log_file)
         self._safe(lambda: self.cam and self.cam.stop())
+        self._safe(lambda: self.laser and self.laser.set_enabled(False))
+        self._safe(lambda: self.dim_worker and self.dim_worker.set_mode_off())
+        self._safe(lambda: self._stop_dimetix_worker(timeout_ms=5000))
         self._safe(lambda: self.ori_worker and self.ori_worker.stop())
-        self._safe(lambda: self.ori_thread and self.ori_thread.quit())
-        self._safe(lambda: self.ori_thread and self.ori_thread.wait())
+        self._safe(lambda: self.ori_worker and self.ori_worker.wait(3000))
         self._safe(lambda: self.motorX and self.motorX.shutdown())
         self._safe(lambda: self.motorY and self.motorY.shutdown())
-        self._safe(lambda: self.laser and self.laser.set_enabled(False))
         self._safe(lambda: self.laser and self.laser.release())
-        self._safe(lambda: self.dim_worker and self.dim_worker.stop_auto_distance())
-        if self.dim_worker and self.dim_worker.isRunning():
-            self.dim_worker.stop(); self.dim_worker.wait(1000)
-            if self.dim_worker.ser:
-                close_port(self.dim_worker.ser); self.dim_worker.ser = None
         self._safe(lambda: self.shared and self.shared.set_enable(False))
-        self._safe(lambda: self.ori_worker and self.ori_worker.stop())
-        self._safe(lambda: self._log_file and self._log_file.close())
 
         return super().closeEvent(e)
 

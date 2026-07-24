@@ -188,6 +188,47 @@ QSpinBox:focus {
     border: 1px solid #1976d2;
 }
 
+QSpinBox {
+    padding-right: 22px;
+}
+
+QSpinBox::up-button {
+    subcontrol-origin: border;
+    subcontrol-position: top right;
+    width: 20px;
+    background-color: #eef4fb;
+    border-left: 1px solid #bdcada;
+    border-bottom: 1px solid #d9e2ef;
+    border-top-right-radius: 4px;
+}
+
+QSpinBox::down-button {
+    subcontrol-origin: border;
+    subcontrol-position: bottom right;
+    width: 20px;
+    background-color: #eef4fb;
+    border-left: 1px solid #bdcada;
+    border-top: 1px solid #d9e2ef;
+    border-bottom-right-radius: 4px;
+}
+
+QSpinBox::up-button:hover,
+QSpinBox::down-button:hover {
+    background-color: #dcecff;
+}
+
+QSpinBox::up-arrow {
+    image: url(:/qt-project.org/styles/commonstyle/images/up-16.png);
+    width: 10px;
+    height: 10px;
+}
+
+QSpinBox::down-arrow {
+    image: url(:/qt-project.org/styles/commonstyle/images/down-16.png);
+    width: 10px;
+    height: 10px;
+}
+
 QLineEdit:read-only {
     background-color: #f8fafc;
     color: #24344f;

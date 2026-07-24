@@ -201,6 +201,23 @@ class StepperWorkerTests(unittest.TestCase):
         self.assertGreater(first, middle)
         self.assertAlmostEqual(first, last)
 
+    def test_duplicate_jog_start_does_not_restart_acceleration(self):
+        worker = motor_control.StepperWorker(
+            motor_control.MotorPins(step=16, dir=9)
+        )
+        worker._jog = True
+        worker._jog_forward = True
+        worker._jog_steps = 42
+
+        worker.start_jog(True)
+        worker._handle_commands()
+        self.assertEqual(worker._jog_steps, 42)
+
+        worker.start_jog(False)
+        worker._handle_commands()
+        self.assertEqual(worker._jog_steps, 0)
+        self.assertFalse(worker._jog_forward)
+
     def test_inverted_dir_pin_preserves_logical_step_sign(self):
         worker = motor_control.StepperWorker(
             motor_control.MotorPins(step=13, dir=6, dir_inverted=True)
