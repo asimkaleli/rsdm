@@ -166,6 +166,23 @@ class StepperWorkerTests(unittest.TestCase):
         self.assertEqual(self.worker._step_line.values[-2:], [1, 0])
         self.assertFalse(self.worker.is_busy())
 
+    def test_controller_routes_signed_move_to_atomic_worker_api(self):
+        class WorkerStub:
+            def __init__(self):
+                self.moves = []
+
+            def submit_move(self, signed_steps):
+                self.moves.append(signed_steps)
+                return 42
+
+        controller = object.__new__(motor_control.MotorController)
+        controller.worker = WorkerStub()
+
+        move_id = controller.move_signed_steps(-1)
+
+        self.assertEqual(move_id, 42)
+        self.assertEqual(controller.worker.moves, [-1])
+
     def test_cancel_reports_incomplete_and_stops_early(self):
         steps = []
         result = []

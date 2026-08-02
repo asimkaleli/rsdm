@@ -453,7 +453,7 @@ class MotorController(QObject):
 
     def move_signed_steps(self, signed_steps: int) -> int:
         """Preferred atomic movement API."""
-        return self.worker.move_steps(int(signed_steps))
+        return self.worker.submit_move(int(signed_steps))
 
     def reset_pulse(self):
         self.worker.reset_pulse()
