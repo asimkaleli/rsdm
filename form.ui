@@ -189,44 +189,69 @@ QSpinBox:focus {
 }
 
 QSpinBox {
-    padding-right: 22px;
+    padding-right: 21px;
 }
 
 QSpinBox::up-button {
     subcontrol-origin: border;
     subcontrol-position: top right;
-    width: 20px;
-    background-color: #eef4fb;
+    width: 19px;
+    background-color: #f5f8fc;
     border-left: 1px solid #bdcada;
-    border-bottom: 1px solid #d9e2ef;
+    border-bottom: 1px solid #e2e8f0;
     border-top-right-radius: 4px;
 }
 
 QSpinBox::down-button {
     subcontrol-origin: border;
     subcontrol-position: bottom right;
-    width: 20px;
-    background-color: #eef4fb;
+    width: 19px;
+    background-color: #f5f8fc;
     border-left: 1px solid #bdcada;
-    border-top: 1px solid #d9e2ef;
+    border-top: 1px solid #e2e8f0;
     border-bottom-right-radius: 4px;
 }
 
 QSpinBox::up-button:hover,
 QSpinBox::down-button:hover {
-    background-color: #dcecff;
+    background-color: #e7f1fc;
 }
 
 QSpinBox::up-arrow {
-    image: url(:/qt-project.org/styles/commonstyle/images/up-16.png);
-    width: 10px;
-    height: 10px;
+    image: url("__CHEVRON_UP_ICON__");
+    width: 9px;
+    height: 6px;
 }
 
 QSpinBox::down-arrow {
-    image: url(:/qt-project.org/styles/commonstyle/images/down-16.png);
-    width: 10px;
-    height: 10px;
+    image: url("__CHEVRON_DOWN_ICON__");
+    width: 9px;
+    height: 6px;
+}
+
+QComboBox {
+    padding-right: 29px;
+}
+
+QComboBox::drop-down {
+    subcontrol-origin: padding;
+    subcontrol-position: top right;
+    width: 25px;
+    background-color: #f5f8fc;
+    border: 0;
+    border-left: 1px solid #bdcada;
+    border-top-right-radius: 4px;
+    border-bottom-right-radius: 4px;
+}
+
+QComboBox::drop-down:hover {
+    background-color: #e7f1fc;
+}
+
+QComboBox::down-arrow {
+    image: url("__CHEVRON_DOWN_ICON__");
+    width: 11px;
+    height: 7px;
 }
 
 QLineEdit:read-only {

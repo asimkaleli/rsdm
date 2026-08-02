@@ -31,7 +31,8 @@ rm -rf build dist
 echo "[2/4] Yeni RSDM binary derleniyor..."
 "$PYI" --onefile --windowed rsdm.py \
     --exclude-module PyQt5 \
-    --add-data "form.ui:."
+    --add-data "form.ui:." \
+    --add-data "ui_assets:ui_assets"
 
 echo "[3/4] Yeni binary uygulama dizinine kopyalanıyor..."
 mkdir -p "$APP_DIR"

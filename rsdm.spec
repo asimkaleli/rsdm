@@ -5,7 +5,7 @@ a = Analysis(
     ['rsdm.py'],
     pathex=[],
     binaries=[],
-    datas=[('form.ui', '.')],
+    datas=[('form.ui', '.'), ('ui_assets', 'ui_assets')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

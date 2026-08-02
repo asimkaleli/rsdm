@@ -23,7 +23,7 @@ from PySide2.QtWidgets import (
     QComboBox, QStyle
 )
 from PySide2.QtGui import QIcon
-from PySide2.QtCore import QFile, Qt, QCoreApplication, QTimer, QSize
+from PySide2.QtCore import QFile, Qt, QCoreApplication, QEvent, QTimer, QSize
 from PySide2.QtUiTools import QUiLoader
 
 # --- Ayrı modüller ---
@@ -142,10 +142,12 @@ QGroupBox::title {
             )
 
             # 2) Motorlar
-            self.motorX = MotorController(MotorPins(step=12, dir=5), shared=self.shared)  # Yaw ~ sağ/sol
+            self.motorX = MotorController(
+                MotorPins(step=13, dir=6), shared=self.shared
+            )  # Yaw ~ sağ/sol; fiziksel motor artık ikinci sürücü kanalında
             self.motorY = MotorController(
-                MotorPins(step=13, dir=6, dir_inverted=True), shared=self.shared
-            )  # Pitch ~ yukarı/aşağı; sürücünün DIR polaritesi ters
+                MotorPins(step=12, dir=5, dir_inverted=True), shared=self.shared
+            )  # Pitch ~ yukarı/aşağı; fiziksel motor artık birinci sürücü kanalında
             self.motorX.set_motion_profile(self.MOTOR_START_SPS, self.MOTOR_ACCELERATION_SPS2)
             self.motorY.set_motion_profile(self.MOTOR_START_SPS, self.MOTOR_ACCELERATION_SPS2)
 
@@ -209,15 +211,33 @@ QGroupBox::title {
         if self.ui.cbMotorSpeed:
             QTimer.singleShot(0, self._apply_initial_speed_from_combo)
 
+        app = QApplication.instance()
+        if app:
+            app.installEventFilter(self)
+
 
     # ---------- UI yükleme ve widget bağlama ----------
     def load_ui(self):
         loader = QUiLoader()
-        path = os.fspath(Path(__file__).resolve().parent / "form.ui")
+        app_dir = Path(__file__).resolve().parent
+        path = os.fspath(app_dir / "form.ui")
         ui_file = QFile(path)
         ui_file.open(QFile.ReadOnly)
-        loader.load(ui_file, self)
+        loaded_ui = loader.load(ui_file, self)
         ui_file.close()
+        if loaded_ui is None:
+            raise RuntimeError(f"Arayüz yüklenemedi: {path}")
+
+        style = loaded_ui.styleSheet()
+        icon_paths = {
+            "__CHEVRON_UP_ICON__": app_dir / "ui_assets" / "chevron_up.svg",
+            "__CHEVRON_DOWN_ICON__": app_dir / "ui_assets" / "chevron_down.svg",
+        }
+        for placeholder, icon_path in icon_paths.items():
+            if not icon_path.is_file():
+                raise RuntimeError(f"Arayüz ikonu bulunamadı: {icon_path}")
+            style = style.replace(placeholder, icon_path.as_posix())
+        loaded_ui.setStyleSheet(style)
 
         # Görüntü label'ını ClickableLabel ile değiştir
         old_label = self.findChild(QLabel, "imageLabel")
@@ -655,67 +675,84 @@ QGroupBox::title {
             self.ui.tmpLe.setText(f"{temp:.2f}")
 
     # ---------- Klavye olayları ----------
-    def keyPressEvent(self, event):
-        if event.isAutoRepeat():
-            return
-
-        key = event.key()
-
+    def _handle_motion_key(self, key: int, pressed: bool) -> bool:
+        """Apply one non-repeat arrow-key state transition."""
         if key == Qt.Key_Right:
-            if not self._x_right_pressed:
-                self._x_right_pressed = True
-                self._x_last_dir = "right"
+            if self._x_right_pressed != pressed:
+                self._x_right_pressed = pressed
+                if pressed:
+                    self._x_last_dir = "right"
                 self._update_x_from_keys()
-            event.accept()
-        elif key == Qt.Key_Left:
-            if not self._x_left_pressed:
-                self._x_left_pressed = True
-                self._x_last_dir = "left"
+            return True
+        if key == Qt.Key_Left:
+            if self._x_left_pressed != pressed:
+                self._x_left_pressed = pressed
+                if pressed:
+                    self._x_last_dir = "left"
                 self._update_x_from_keys()
-            event.accept()
-        elif key == Qt.Key_Up:
-            if not self._y_up_pressed:
-                self._y_up_pressed = True
-                self._y_last_dir = "up"
+            return True
+        if key == Qt.Key_Up:
+            if self._y_up_pressed != pressed:
+                self._y_up_pressed = pressed
+                if pressed:
+                    self._y_last_dir = "up"
                 self._update_y_from_keys()
-            event.accept()
-        elif key == Qt.Key_Down:
-            if not self._y_down_pressed:
-                self._y_down_pressed = True
-                self._y_last_dir = "down"
+            return True
+        if key == Qt.Key_Down:
+            if self._y_down_pressed != pressed:
+                self._y_down_pressed = pressed
+                if pressed:
+                    self._y_last_dir = "down"
                 self._update_y_from_keys()
+            return True
+        return False
+
+    def _release_motion_keys(self):
+        """Stop keyboard jog if focus/application state changes mid-press."""
+        x_active = self._x_left_pressed or self._x_right_pressed
+        y_active = self._y_up_pressed or self._y_down_pressed
+        self._x_left_pressed = False
+        self._x_right_pressed = False
+        self._y_up_pressed = False
+        self._y_down_pressed = False
+        if x_active:
+            self._x_stop()
+        if y_active:
+            self._y_stop()
+
+    def eventFilter(self, watched, event):
+        event_type = event.type()
+        if event_type in (QEvent.ApplicationDeactivate, QEvent.WindowDeactivate):
+            self._release_motion_keys()
+        elif event_type in (QEvent.KeyPress, QEvent.KeyRelease):
+            key = event.key()
+            if key in (Qt.Key_Left, Qt.Key_Right, Qt.Key_Up, Qt.Key_Down):
+                # Releases are always consumed so a modal/focus transition
+                # cannot leave a jog active. Presses only control motors while
+                # this window is the active, non-modal window.
+                if event_type == QEvent.KeyRelease:
+                    if not event.isAutoRepeat():
+                        self._handle_motion_key(key, False)
+                    return True
+                if self.isActiveWindow() and QApplication.activeModalWidget() is None:
+                    if not event.isAutoRepeat():
+                        self._handle_motion_key(key, True)
+                    return True
+        return super(rsdm, self).eventFilter(watched, event)
+
+    def keyPressEvent(self, event):
+        if (not event.isAutoRepeat()
+                and self._handle_motion_key(event.key(), True)):
             event.accept()
-        else:
-            super(rsdm, self).keyPressEvent(event)
+            return
+        super(rsdm, self).keyPressEvent(event)
 
     def keyReleaseEvent(self, event):
-        if event.isAutoRepeat():
+        if (not event.isAutoRepeat()
+                and self._handle_motion_key(event.key(), False)):
+            event.accept()
             return
-
-        key = event.key()
-
-        if key == Qt.Key_Right:
-            if self._x_right_pressed:
-                self._x_right_pressed = False
-                self._update_x_from_keys()
-            event.accept()
-        elif key == Qt.Key_Left:
-            if self._x_left_pressed:
-                self._x_left_pressed = False
-                self._update_x_from_keys()
-            event.accept()
-        elif key == Qt.Key_Up:
-            if self._y_up_pressed:
-                self._y_up_pressed = False
-                self._update_y_from_keys()
-            event.accept()
-        elif key == Qt.Key_Down:
-            if self._y_down_pressed:
-                self._y_down_pressed = False
-                self._update_y_from_keys()
-            event.accept()
-        else:
-            super(rsdm, self).keyReleaseEvent(event)
+        super(rsdm, self).keyReleaseEvent(event)
 
     def _update_x_from_keys(self):
         """
@@ -2281,10 +2318,10 @@ QGroupBox::title {
 
     def closeEvent(self, e):
         self._scan_cancel_requested = True
-        self._x_left_pressed = False
-        self._x_right_pressed = False
-        self._y_up_pressed = False
-        self._y_down_pressed = False
+        self._release_motion_keys()
+        app = QApplication.instance()
+        if app:
+            app.removeEventFilter(self)
         self._safe(lambda: self.motorX and self.motorX.emergency_stop())
         self._safe(lambda: self.motorY and self.motorY.emergency_stop())
         self._safe(self._close_log_file)
