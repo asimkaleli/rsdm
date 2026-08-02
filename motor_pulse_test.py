@@ -14,6 +14,7 @@ import time
 
 from PySide2.QtCore import QCoreApplication
 
+from laser_gpio import LaserGPIO
 from motor_control import MotorController, MotorPins, SharedPins
 
 
@@ -92,6 +93,7 @@ def main() -> int:
     app = QCoreApplication.instance() or QCoreApplication(sys.argv[:1])
     shared = None
     motor = None
+    laser = None
     rows = []
     move_results = {}
     active_phase = {"name": "setup"}
@@ -123,6 +125,8 @@ def main() -> int:
         motor.set_speed_ms(1000.0 / (2.0 * args.speed_sps))
         motor.set_microstep("SIXTEENTH")
         shared.set_enable(True)
+        laser = LaserGPIO(line=24)
+        laser.set_enabled(False)
 
         motor.set_step_callback(
             lambda delta: record("step_batch", step_delta=int(delta))
@@ -146,8 +150,14 @@ def main() -> int:
             f"{axis['positive_name']}, sonra {args.steps} pulse "
             f"{axis['negative_name']} hareket edecek."
         )
+        print("UYARI: GPIO24 lazeri test boyunca acik kalacak; goz hizasina bakmayin.")
         print(f"Hiz: {args.speed_sps:g} step/s  Log: {output}")
-        print("Hareket 3 saniye sonra baslayacak. Ctrl+C ile iptal edebilirsiniz.")
+        laser.set_enabled(True)
+        record("laser_on")
+        print(
+            "Lazer acildi. Baslangic noktasini isaretleyin; hareket 3 saniye "
+            "sonra baslayacak. Ctrl+C ile iptal edebilirsiniz."
+        )
         for remaining in (3, 2, 1):
             print(remaining)
             time.sleep(1.0)
@@ -197,6 +207,16 @@ def main() -> int:
         print(f"Test hatasi: {exc}")
         return 1
     finally:
+        if laser is not None:
+            try:
+                laser.set_enabled(False)
+                record("laser_off")
+            except Exception as exc:
+                print(f"Lazer kapatma hatasi: {exc}")
+            try:
+                laser.release()
+            except Exception:
+                pass
         if motor is not None:
             motor.shutdown()
         if rows:
