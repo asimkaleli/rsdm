@@ -103,6 +103,8 @@ class StepperWorker(QObject):
     moveStarted = Signal(int, int)   # move_id, signed_steps
     moveFinished = Signal(int, bool)  # move_id, completed; False means cancelled
     timingReport = Signal(int, float, float)  # pulse intervals, mean period ms, max jitter ms
+    pulsePhaseReport = Signal(int, float, float, float, float)
+    # samples, min HIGH ms, max HIGH ms, min LOW ms, max LOW ms
 
     def __init__(self, pins: MotorPins, shared: Optional[SharedPins] = None, parent=None):
         super().__init__(parent)
@@ -134,6 +136,11 @@ class StepperWorker(QObject):
         self._timing_max_jitter_s = 0.0
         self._timing_last_start = None
         self._timing_last_expected_period_s = None
+        self._phase_count = 0
+        self._phase_high_min_s = None
+        self._phase_high_max_s = 0.0
+        self._phase_low_min_s = None
+        self._phase_low_max_s = 0.0
         self._pending_step_delta = 0
         self._last_step_emit_s = 0.0
         self._step_emit_batch = 8
@@ -173,15 +180,24 @@ class StepperWorker(QObject):
         pulse_start = time.monotonic()
         self._record_pulse_timing(pulse_start, 2.0 * pulse_edge_s)
         self._step_line.set_value(1)
-        self._sleep_until(pulse_start + pulse_edge_s)
+        high_started = time.monotonic()
+        self._sleep_until(high_started + pulse_edge_s)
         self._step_line.set_value(0)
+        low_started = time.monotonic()
         delta = 1 if self._forward else -1
         self._total += 1
         with self._state_lock:
             self._position_steps += delta
         self._pending_step_delta += delta
         self._emit_step_update()
-        self._sleep_until(pulse_start + 2.0 * pulse_edge_s)
+        # LOW has its own deadline. Scheduler overrun during HIGH must never
+        # be "recovered" by shortening the driver's minimum LOW pulse width.
+        self._sleep_until(low_started + pulse_edge_s)
+        low_finished = time.monotonic()
+        self._record_pulse_phases(
+            high_s=low_started - high_started,
+            low_s=low_finished - low_started,
+        )
 
     def _emit_step_update(self, force: bool = False):
         """Publish exact position deltas without flooding the Qt event queue."""
@@ -203,6 +219,26 @@ class StepperWorker(QObject):
         self._timing_max_jitter_s = 0.0
         self._timing_last_start = None
         self._timing_last_expected_period_s = None
+        self._phase_count = 0
+        self._phase_high_min_s = None
+        self._phase_high_max_s = 0.0
+        self._phase_low_min_s = None
+        self._phase_low_max_s = 0.0
+
+    def _record_pulse_phases(self, high_s: float, low_s: float):
+        high_s = max(0.0, float(high_s))
+        low_s = max(0.0, float(low_s))
+        self._phase_count += 1
+        self._phase_high_min_s = (
+            high_s if self._phase_high_min_s is None
+            else min(self._phase_high_min_s, high_s)
+        )
+        self._phase_high_max_s = max(self._phase_high_max_s, high_s)
+        self._phase_low_min_s = (
+            low_s if self._phase_low_min_s is None
+            else min(self._phase_low_min_s, low_s)
+        )
+        self._phase_low_max_s = max(self._phase_low_max_s, low_s)
 
     def _record_pulse_timing(self, pulse_start: float, expected_period_s: float):
         if self._timing_last_start is not None:
@@ -223,6 +259,14 @@ class StepperWorker(QObject):
             max_jitter_ms = 1000.0 * self._timing_max_jitter_s
             self.timingReport.emit(
                 self._timing_count, mean_period_ms, max_jitter_ms
+            )
+        if self._phase_count > 0:
+            self.pulsePhaseReport.emit(
+                self._phase_count,
+                1000.0 * self._phase_high_min_s,
+                1000.0 * self._phase_high_max_s,
+                1000.0 * self._phase_low_min_s,
+                1000.0 * self._phase_low_max_s,
             )
         self._reset_timing()
 
@@ -458,6 +502,12 @@ class StepperWorker(QObject):
         except Exception as exc:
             self.error.emit(str(exc))
         finally:
+            # Never leave the driver STEP input asserted after an exception or
+            # shutdown. A later restart must begin from a known LOW idle state.
+            try:
+                self._step_line.set_value(0)
+            except Exception:
+                pass
             self._set_busy(False)
             self.finished.emit()
 
@@ -483,6 +533,7 @@ class MotorController(QObject):
     moveStarted = Signal(int, int)
     moveFinished = Signal(int, bool)
     timingReport = Signal(int, float, float)
+    pulsePhaseReport = Signal(int, float, float, float, float)
 
     def __init__(self, pins: MotorPins, shared: Optional[SharedPins] = None, parent=None):
         super().__init__(parent)
@@ -496,6 +547,7 @@ class MotorController(QObject):
         self.worker.moveStarted.connect(self.moveStarted)
         self.worker.moveFinished.connect(self.moveFinished)
         self.worker.timingReport.connect(self.timingReport)
+        self.worker.pulsePhaseReport.connect(self.pulsePhaseReport)
         self.th.started.connect(self.worker.run)
         self.th.start()
 

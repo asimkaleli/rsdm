@@ -117,6 +117,11 @@ def main() -> int:
             "timing_intervals": values.get("timing_intervals", ""),
             "mean_period_ms": values.get("mean_period_ms", ""),
             "max_jitter_ms": values.get("max_jitter_ms", ""),
+            "phase_samples": values.get("phase_samples", ""),
+            "min_high_ms": values.get("min_high_ms", ""),
+            "max_high_ms": values.get("max_high_ms", ""),
+            "min_low_ms": values.get("min_low_ms", ""),
+            "max_low_ms": values.get("max_low_ms", ""),
             "completed": values.get("completed", ""),
         })
 
@@ -149,6 +154,17 @@ def main() -> int:
                     timing_intervals=int(count),
                     mean_period_ms=f"{mean_ms:.6f}",
                     max_jitter_ms=f"{jitter_ms:.6f}",
+                )
+            )
+            motor.pulsePhaseReport.connect(
+                lambda count, min_high, max_high, min_low, max_low, a=axis_name: record(
+                    "pulse_phases",
+                    axis_name=a,
+                    phase_samples=int(count),
+                    min_high_ms=f"{min_high:.6f}",
+                    max_high_ms=f"{max_high:.6f}",
+                    min_low_ms=f"{min_low:.6f}",
+                    max_low_ms=f"{max_low:.6f}",
                 )
             )
         shared.set_enable(True)

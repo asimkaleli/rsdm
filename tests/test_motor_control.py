@@ -312,30 +312,59 @@ class StepperWorkerTests(unittest.TestCase):
         self.assertEqual(worker.position_steps(), 1)
         self.assertEqual(worker._dir_line.values[-1], 0)
 
-    def test_pulse_uses_absolute_edge_deadlines(self):
+    def test_pulse_guarantees_full_high_and_low_waits(self):
         worker = motor_control.StepperWorker(
             motor_control.MotorPins(step=14, dir=7)
         )
         clock = {"now": 10.0}
         sleep_deadlines = []
+        phase_reports = []
+        worker.pulsePhaseReport.connect(
+            lambda *values: phase_reports.append(values)
+        )
 
         def monotonic():
             return clock["now"]
 
         def sleep(seconds):
             sleep_deadlines.append(seconds)
-            # Simulate 0.2 ms operating-system wake-up latency.  The second
-            # sleep must compensate for it instead of accumulating another
-            # full edge duration.
+            # Simulate 0.2 ms operating-system wake-up latency. LOW must still
+            # get a complete independent wait instead of being shortened.
             clock["now"] += seconds + 0.0002
 
         with patch.object(motor_control.time, "monotonic", side_effect=monotonic), \
              patch.object(motor_control.time, "sleep", side_effect=sleep):
             worker._pulse_once(edge_s=0.001)
+            worker._emit_timing_report()
 
         self.assertAlmostEqual(sleep_deadlines[0], 0.001, places=6)
-        self.assertAlmostEqual(sleep_deadlines[1], 0.0008, places=6)
-        self.assertAlmostEqual(clock["now"], 10.0022, places=6)
+        self.assertAlmostEqual(sleep_deadlines[1], 0.001, places=6)
+        self.assertAlmostEqual(clock["now"], 10.0024, places=6)
+        self.assertEqual(len(phase_reports), 1)
+        samples, min_high, max_high, min_low, max_low = phase_reports[0]
+        self.assertEqual(samples, 1)
+        self.assertAlmostEqual(min_high, 1.2, places=6)
+        self.assertAlmostEqual(max_high, 1.2, places=6)
+        self.assertAlmostEqual(min_low, 1.2, places=6)
+        self.assertAlmostEqual(max_low, 1.2, places=6)
+
+    def test_worker_forces_step_low_after_exception(self):
+        worker = motor_control.StepperWorker(
+            motor_control.MotorPins(step=16, dir=9)
+        )
+        errors = []
+        worker.error.connect(errors.append)
+
+        def fail_with_step_asserted():
+            worker._step_line.set_value(1)
+            raise RuntimeError("forced test failure")
+
+        worker._handle_commands = fail_with_step_asserted
+        worker.run()
+
+        self.assertEqual(errors, ["forced test failure"])
+        self.assertEqual(worker._step_line.values[-2:], [1, 0])
+        self.assertFalse(worker.is_busy())
 
     def test_step_updates_are_batched_without_losing_position(self):
         worker = motor_control.StepperWorker(

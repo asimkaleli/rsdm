@@ -171,6 +171,18 @@ QGroupBox::title {
                     "Y", count, mean_ms, jitter_ms
                 )
             )
+            self.motorX.pulsePhaseReport.connect(
+                lambda count, min_high, max_high, min_low, max_low:
+                self._on_motor_phase_timing(
+                    "X", count, min_high, max_high, min_low, max_low
+                )
+            )
+            self.motorY.pulsePhaseReport.connect(
+                lambda count, min_high, max_high, min_low, max_low:
+                self._on_motor_phase_timing(
+                    "Y", count, min_high, max_high, min_low, max_low
+                )
+            )
 
             # Microstep (her iki motora etki eder)
             self.motorX.set_microstep("SIXTEENTH")
@@ -1427,6 +1439,16 @@ QGroupBox::title {
         )
         sys.stdout.flush()
 
+    def _on_motor_phase_timing(self, axis: str, count: int,
+                               min_high_ms: float, max_high_ms: float,
+                               min_low_ms: float, max_low_ms: float):
+        print(
+            f"[pulse-{axis}] samples={count} "
+            f"high_ms={min_high_ms:.3f}..{max_high_ms:.3f} "
+            f"low_ms={min_low_ms:.3f}..{max_low_ms:.3f}"
+        )
+        sys.stdout.flush()
+
     def on_pb_store_point(self):
         """
         pbStorePoint:
@@ -2211,6 +2233,13 @@ QGroupBox::title {
                 if x_done and y_done:
                     completed = x_results[x_id] and y_results[y_id]
                     if completed:
+                        # moveFinished is emitted just before the worker's
+                        # final busy-state update. Do not expose the next scan
+                        # target until both command queues are verifiably idle.
+                        if not self._wait_both_idle(
+                                timeout_ms=5000, settle_ms=30):
+                            self._mark_position_unknown()
+                            return False
                         self._sync_absolute_steps()
                     return completed
                 time.sleep(0.005)
