@@ -115,9 +115,6 @@ class StepperWorker(QObject):
         self._start_sps = 50.0
         self._acceleration_sps2 = 400.0
         self._forward = True
-        self._jog = False
-        self._jog_forward = True
-        self._jog_steps = 0
         # [move_id, remaining_steps, total_steps, completed_steps]
         self._active_move = None
         self._moves = deque()     # (move_id, signed_steps)
@@ -126,6 +123,7 @@ class StepperWorker(QObject):
         self._state_lock = Lock()
         self._run = True
         self._total = 0
+        self._position_steps = 0
         self._busy = False
         self._next_move_id = 1
         self._timing_count = 0
@@ -176,6 +174,8 @@ class StepperWorker(QObject):
         self._step_line.set_value(0)
         delta = 1 if self._forward else -1
         self._total += 1
+        with self._state_lock:
+            self._position_steps += delta
         self._pending_step_delta += delta
         self._emit_step_update()
         self._sleep_until(pulse_start + 2.0 * pulse_edge_s)
@@ -245,7 +245,7 @@ class StepperWorker(QObject):
         """Queue without touching GPIO from the caller's thread."""
         with self._condition:
             self._commands.append((name, args))
-            if name in ("move", "jog_start"):
+            if name == "move":
                 self._set_busy(True)
             self._condition.notify()
 
@@ -296,37 +296,10 @@ class StepperWorker(QObject):
                     self.error.emit("SharedPins yok: microstep ortak pinleri yonetilemiyor.")
             elif name == "move":
                 move_id, signed_steps = int(args[0]), int(args[1])
-                if self._jog:
-                    self.error.emit("Jog aktifken planli hareket reddedildi.")
-                    self.moveFinished.emit(move_id, False)
-                else:
-                    self._moves.append((move_id, signed_steps))
-            elif name == "jog_start":
-                if self._active_move is not None or self._moves:
-                    self.error.emit("Planli hareket aktifken jog reddedildi.")
-                else:
-                    requested_forward = bool(args[0])
-                    # Keyboard repeat or duplicate UI press events must not
-                    # restart the acceleration profile of an active jog.
-                    if self._jog and self._jog_forward == requested_forward:
-                        continue
-                    self._jog_forward = requested_forward
-                    self._jog_steps = 0
-                    self._reset_timing()
-                    self._jog = True
-                    self._wake(True)
-            elif name == "jog_stop":
-                if self._jog:
-                    self._emit_step_update(force=True)
-                    self._emit_timing_report()
-                self._jog = False
+                self._moves.append((move_id, signed_steps))
             elif name == "cancel_moves":
                 self._cancel_moves_in_worker()
             elif name == "emergency_stop":
-                if self._jog:
-                    self._emit_step_update(force=True)
-                    self._emit_timing_report()
-                self._jog = False
                 self._cancel_moves_in_worker()
             elif name == "reset":
                 if self.shared:
@@ -337,12 +310,10 @@ class StepperWorker(QObject):
                 if self.shared:
                     self.shared.set_sleep(not bool(args[0]))
                 if args[0]:
-                    self._jog = False
                     self._cancel_moves_in_worker()
             elif name == "enable":
                 self._enable(bool(args[0]))
             elif name == "shutdown":
-                self._jog = False
                 self._cancel_moves_in_worker()
                 self._emit_step_update(force=True)
                 self._run = False
@@ -358,13 +329,6 @@ class StepperWorker(QObject):
     def set_microstep(self, mode: str):
         self._queue_command("microstep", str(mode))
 
-    def start_jog(self, forward: bool):
-        self._queue_command("jog_start", bool(forward))
-
-    @Slot()
-    def stop_jog(self):
-        self._queue_command("jog_stop")
-
     @Slot()
     def cancel_moves(self):
         self._queue_command("cancel_moves")
@@ -372,9 +336,6 @@ class StepperWorker(QObject):
     @Slot()
     def emergency_stop(self):
         self._queue_command("emergency_stop")
-
-    def move_steps(self, signed_steps: int) -> int:
-        return self.submit_move(signed_steps)
 
     @Slot()
     def reset_pulse(self):
@@ -419,21 +380,6 @@ class StepperWorker(QObject):
                         self._emit_step_update(force=True)
                         self._emit_timing_report()
                         self.moveFinished.emit(move_id, True)
-                elif self._jog:
-                    if self._forward != self._jog_forward:
-                        self._forward = self._jog_forward
-                        self._apply_dir()
-                    target_sps = 1.0 / (2.0 * self._edge_s)
-                    start_sps = min(target_sps, max(1.0, self._start_sps))
-                    jog_sps = min(
-                        target_sps,
-                        math.sqrt(
-                            start_sps * start_sps
-                            + 2.0 * max(1.0, self._acceleration_sps2) * self._jog_steps
-                        ),
-                    )
-                    self._pulse_once(edge_s=1.0 / (2.0 * jog_sps))
-                    self._jog_steps += 1
                 else:
                     with self._condition:
                         if not self._commands:
@@ -443,8 +389,8 @@ class StepperWorker(QObject):
                 with self._condition:
                     pending_commands = bool(self._commands)
                     self._set_busy(bool(
-                        self._jog or self._active_move is not None
-                        or self._moves or pending_commands
+                        self._active_move is not None or self._moves
+                        or pending_commands
                     ))
         except Exception as exc:
             self.error.emit(str(exc))
@@ -458,6 +404,11 @@ class StepperWorker(QObject):
     def is_busy(self) -> bool:
         with self._state_lock:
             return self._busy
+
+    def position_steps(self) -> int:
+        """Return the exact signed pulse position maintained by the worker."""
+        with self._state_lock:
+            return int(self._position_steps)
 
 
 class MotorController(QObject):
@@ -475,7 +426,6 @@ class MotorController(QObject):
         self.worker = StepperWorker(pins, shared=shared)
         self.th = QThread()
         self.worker.moveToThread(self.th)
-        self._requested_forward = True
 
         self.worker.progress.connect(self.progress)
         self.worker.error.connect(self.error)
@@ -489,38 +439,17 @@ class MotorController(QObject):
     def set_speed_ms(self, ms: float):
         self.worker.set_speed_ms(ms)
 
-    def set_direction(self, forward: bool):
-        """Select direction for the next compatibility move or jog call."""
-        self._requested_forward = bool(forward)
-
     def set_microstep(self, mode: str):
         self.worker.set_microstep(mode)
 
     def set_motion_profile(self, start_sps: float, acceleration_sps2: float):
         self.worker.set_motion_profile(start_sps, acceleration_sps2)
 
-    def start_jog(self):
-        self.worker.start_jog(self._requested_forward)
-
-    def stop_jog(self):
-        self.worker.stop_jog()
-
-    def stop(self):
-        """Compatibility alias. It intentionally stops jog only."""
-        self.stop_jog()
-
     def cancel_moves(self):
         self.worker.cancel_moves()
 
     def emergency_stop(self):
         self.worker.emergency_stop()
-
-    def move_steps(self, n: int) -> int:
-        """Queue positive count using the direction chosen by set_direction."""
-        n = abs(int(n))
-        if n == 0:
-            return 0
-        return self.worker.move_steps(n if self._requested_forward else -n)
 
     def move_signed_steps(self, signed_steps: int) -> int:
         """Preferred atomic movement API."""
@@ -540,6 +469,9 @@ class MotorController(QObject):
 
     def is_busy(self) -> bool:
         return self.worker.is_busy()
+
+    def position_steps(self) -> int:
+        return self.worker.position_steps()
 
     def wait_until_idle(self, timeout_ms: int = 8000) -> bool:
         if not self.is_busy():

@@ -61,6 +61,7 @@ class rsdm(QWidget):
     MOTOR_START_SPS = 50.0
     MOTOR_ACCELERATION_SPS2 = 400.0
     DISTANCE_MIN_FRESHNESS_S = 2.0
+    MANUAL_NUDGE_STEPS = 1
 
     def __init__(self):
         super(rsdm, self).__init__()
@@ -188,8 +189,17 @@ QGroupBox::title {
         self._x_right_pressed = False
         self._y_up_pressed = False
         self._y_down_pressed = False
-        self._x_last_dir = None   # "left" / "right"
-        self._y_last_dir = None   # "up" / "down"
+        self._key_release_tokens = {
+            Qt.Key_Left: 0,
+            Qt.Key_Right: 0,
+            Qt.Key_Up: 0,
+            Qt.Key_Down: 0,
+        }
+
+        # Sequential endpoint positions are read directly from the motor
+        # workers, independently of queued Qt step-update signals.
+        self._seq_first_steps = None
+        self._seq_last_steps = None
 
         # --- Plan çıktısı ---
         self._planner_result = None  # dict: xyz, dpy, pitch_steps_delta, yaw_steps_delta
@@ -352,14 +362,18 @@ QGroupBox::title {
         self.ui.table.model().rowsRemoved.connect(self.on_rows_removed)
 
         # Motor butonları
-        self.ui.btnRight.pressed.connect(self._x_right_press)
-        self.ui.btnRight.released.connect(self._x_stop)
-        self.ui.btnLeft.pressed.connect(self._x_left_press)
-        self.ui.btnLeft.released.connect(self._x_stop)
-        self.ui.btnUp.pressed.connect(self._y_up_press)
-        self.ui.btnUp.released.connect(self._y_stop)
-        self.ui.btnDown.pressed.connect(self._y_down_press)
-        self.ui.btnDown.released.connect(self._y_stop)
+        self.ui.btnRight.clicked.connect(
+            lambda: self._queue_manual_nudge("x", "right")
+        )
+        self.ui.btnLeft.clicked.connect(
+            lambda: self._queue_manual_nudge("x", "left")
+        )
+        self.ui.btnUp.clicked.connect(
+            lambda: self._queue_manual_nudge("y", "up")
+        )
+        self.ui.btnDown.clicked.connect(
+            lambda: self._queue_manual_nudge("y", "down")
+        )
 
         self.ui.cbLazer.toggled.connect(self.on_laser_toggled)
         self.ui.cbManualMeasure.toggled.connect(self.on_manual_measure_select)
@@ -378,7 +392,7 @@ QGroupBox::title {
         self.ui.pbStopLogging.clicked.connect(self.on_pb_stop_logging)
 
     def on_emergency_stop_clicked(self):
-        """Jog ve planlı hareketleri kes; yazılımsal hedef konumunu geçersizleştir."""
+        """Bekleyen/planlı hareketleri kes ve yazılımsal konumu geçersizleştir."""
         self._scan_cancel_requested = True
         self._x_left_pressed = False
         self._x_right_pressed = False
@@ -396,6 +410,8 @@ QGroupBox::title {
             self._origin_angle_row = None
             self._first_distance = None
             self._last_distance_at_select = None
+            self._seq_first_steps = None
+            self._seq_last_steps = None
             self._track_steps = False
             self._awaiting_marker_click = False
             self._last_store_row = None
@@ -534,6 +550,8 @@ QGroupBox::title {
         self._last_distance_unit = ""
         self._first_distance = None
         self._last_distance_at_select = None
+        self._seq_first_steps = None
+        self._seq_last_steps = None
         self._track_steps = False
 
         if hasattr(self, "label") and self.label:
@@ -676,49 +694,42 @@ QGroupBox::title {
 
     # ---------- Klavye olayları ----------
     def _handle_motion_key(self, key: int, pressed: bool) -> bool:
-        """Apply one non-repeat arrow-key state transition."""
-        if key == Qt.Key_Right:
-            if self._x_right_pressed != pressed:
-                self._x_right_pressed = pressed
-                if pressed:
-                    self._x_last_dir = "right"
-                self._update_x_from_keys()
-            return True
-        if key == Qt.Key_Left:
-            if self._x_left_pressed != pressed:
-                self._x_left_pressed = pressed
-                if pressed:
-                    self._x_last_dir = "left"
-                self._update_x_from_keys()
-            return True
-        if key == Qt.Key_Up:
-            if self._y_up_pressed != pressed:
-                self._y_up_pressed = pressed
-                if pressed:
-                    self._y_last_dir = "up"
-                self._update_y_from_keys()
-            return True
-        if key == Qt.Key_Down:
-            if self._y_down_pressed != pressed:
-                self._y_down_pressed = pressed
-                if pressed:
-                    self._y_last_dir = "down"
-                self._update_y_from_keys()
-            return True
-        return False
+        """Queue one pulse on each physical key press; holding does nothing."""
+        key_map = {
+            Qt.Key_Right: ("_x_right_pressed", "x", "right"),
+            Qt.Key_Left: ("_x_left_pressed", "x", "left"),
+            Qt.Key_Up: ("_y_up_pressed", "y", "up"),
+            Qt.Key_Down: ("_y_down_pressed", "y", "down"),
+        }
+        mapping = key_map.get(key)
+        if mapping is None:
+            return False
+        attr, axis, direction = mapping
+        was_pressed = bool(getattr(self, attr))
+        setattr(self, attr, bool(pressed))
+        if pressed and not was_pressed:
+            self._queue_manual_nudge(axis, direction)
+        return True
 
     def _release_motion_keys(self):
-        """Stop keyboard jog if focus/application state changes mid-press."""
-        x_active = self._x_left_pressed or self._x_right_pressed
-        y_active = self._y_up_pressed or self._y_down_pressed
+        """Clear key latches if focus/application state changes."""
+        for key in self._key_release_tokens:
+            self._key_release_tokens[key] += 1
         self._x_left_pressed = False
         self._x_right_pressed = False
         self._y_up_pressed = False
         self._y_down_pressed = False
-        if x_active:
-            self._x_stop()
-        if y_active:
-            self._y_stop()
+
+    def _schedule_motion_key_release(self, key: int):
+        """Debounce Linux key-repeat release/press pairs without extra pulses."""
+        self._key_release_tokens[key] += 1
+        token = self._key_release_tokens[key]
+
+        def finish_release():
+            if self._key_release_tokens.get(key) == token:
+                self._handle_motion_key(key, False)
+
+        QTimer.singleShot(40, finish_release)
 
     def eventFilter(self, watched, event):
         event_type = event.type()
@@ -727,122 +738,56 @@ QGroupBox::title {
         elif event_type in (QEvent.KeyPress, QEvent.KeyRelease):
             key = event.key()
             if key in (Qt.Key_Left, Qt.Key_Right, Qt.Key_Up, Qt.Key_Down):
-                # Releases are always consumed so a modal/focus transition
-                # cannot leave a jog active. Presses only control motors while
-                # this window is the active, non-modal window.
+                # Auto-repeat is consumed: holding an arrow never creates a
+                # pulse train. Every new physical press queues exactly 1 pulse.
                 if event_type == QEvent.KeyRelease:
                     if not event.isAutoRepeat():
-                        self._handle_motion_key(key, False)
+                        self._schedule_motion_key_release(key)
                     return True
                 if self.isActiveWindow() and QApplication.activeModalWidget() is None:
+                    # Any following press cancels a pending synthetic release,
+                    # even on platforms that mislabel repeat events.
+                    self._key_release_tokens[key] += 1
                     if not event.isAutoRepeat():
                         self._handle_motion_key(key, True)
                     return True
         return super(rsdm, self).eventFilter(watched, event)
 
     def keyPressEvent(self, event):
+        key = event.key()
+        if key in self._key_release_tokens:
+            self._key_release_tokens[key] += 1
         if (not event.isAutoRepeat()
-                and self._handle_motion_key(event.key(), True)):
+                and self._handle_motion_key(key, True)):
             event.accept()
             return
         super(rsdm, self).keyPressEvent(event)
 
     def keyReleaseEvent(self, event):
-        if (not event.isAutoRepeat()
-                and self._handle_motion_key(event.key(), False)):
+        key = event.key()
+        if not event.isAutoRepeat() and key in self._key_release_tokens:
+            self._schedule_motion_key_release(key)
             event.accept()
             return
         super(rsdm, self).keyReleaseEvent(event)
 
-    def _update_x_from_keys(self):
-        """
-        X ekseni için klavye tuşlarına göre motor durumunu güncelle.
-        - Sadece sağ basılı: sağa jog
-        - Sadece sol basılı: sola jog
-        - İkisi de değil: durdur
-        - İkisi birden basılı: son basılan yönü kullan
-        """
-        if self._x_right_pressed and not self._x_left_pressed:
-            self._x_right_press()
-        elif self._x_left_pressed and not self._x_right_pressed:
-            self._x_left_press()
-        elif not self._x_left_pressed and not self._x_right_pressed:
-            self._x_stop()
-        else:
-            # Her ikisi de basılı → son basılan yönü kullan
-            if self._x_last_dir == "right":
-                self._x_right_press()
-            elif self._x_last_dir == "left":
-                self._x_left_press()
+    def _axis_motor(self, axis: str):
+        return self.motorX if axis == "x" else self.motorY
 
-    def _update_y_from_keys(self):
-        """
-        Y ekseni için klavye tuşlarına göre motor durumunu güncelle.
-        """
-        if self._y_up_pressed and not self._y_down_pressed:
-            self._y_up_press()
-        elif self._y_down_pressed and not self._y_up_pressed:
-            self._y_down_press()
-        elif not self._y_up_pressed and not self._y_down_pressed:
-            self._y_stop()
-        else:
-            if self._y_last_dir == "up":
-                self._y_up_press()
-            elif self._y_last_dir == "down":
-                self._y_down_press()
-
-    # ---------- Motor handler'ları ----------
-    def _x_right_press(self):
+    def _queue_manual_nudge(self, axis: str, direction: str):
+        """Queue exactly one driver pulse for a short button/key press."""
         if self._programmatic_motion_active or self._scan_sequence_active:
             return
-        try:
-            self._mark_position_unknown()
-            self.motorX.set_direction(False)
-            self.motorX.start_jog()
-        except Exception as e:
-            QMessageBox.critical(self, "Motor X", str(e))
-
-    def _x_left_press(self):
-        if self._programmatic_motion_active or self._scan_sequence_active:
-            return
-        try:
-            self._mark_position_unknown()
-            self.motorX.set_direction(True)
-            self.motorX.start_jog()
-        except Exception as e:
-            QMessageBox.critical(self, "Motor X", str(e))
-
-    def _x_stop(self):
-        try:
-            self.motorX.stop()
-        except Exception as e:
-            QMessageBox.critical(self, "Motor X", str(e))
-
-    def _y_up_press(self):
-        if self._programmatic_motion_active or self._scan_sequence_active:
-            return
-        try:
-            self._mark_position_unknown()
-            self.motorY.set_direction(True)
-            self.motorY.start_jog()
-        except Exception as e:
-            QMessageBox.critical(self, "Motor Y", str(e))
-
-    def _y_down_press(self):
-        if self._programmatic_motion_active or self._scan_sequence_active:
-            return
-        try:
-            self._mark_position_unknown()
-            self.motorY.set_direction(False)
-            self.motorY.start_jog()
-        except Exception as e:
-            QMessageBox.critical(self, "Motor Y", str(e))
-
-    def _y_stop(self):
-        try:
-            self.motorY.stop()
-        except Exception as e:
-            QMessageBox.critical(self, "Motor Y", str(e))
+        sign = {
+            ("x", "right"): -1,
+            ("x", "left"): 1,
+            ("y", "up"): 1,
+            ("y", "down"): -1,
+        }[(axis, direction)]
+        self._mark_position_unknown()
+        self._axis_motor(axis).move_signed_steps(
+            sign * max(1, int(self.MANUAL_NUDGE_STEPS))
+        )
 
     # ---------- Hız / speed combo ----------
     def init_speed_combo(self):
@@ -1068,6 +1013,11 @@ QGroupBox::title {
             QMessageBox.warning(self, "Hata", "Önce en az bir pvStorePoint ile referans belirleyin.")
             return False
 
+        if self.motorX.is_busy() or self.motorY.is_busy():
+            QMessageBox.warning(self, "Motor Meşgul", "Motor hareketi devam ediyor.")
+            return False
+        self._sync_absolute_steps()
+
         # step/deg oranları
         deg_per_step_x = float(self.STEP_ANGLE_DEG_X) / float(self.MICROSTEP_DIV_X) / float(self.GEAR_RATIO_X)
         deg_per_step_y = float(self.STEP_ANGLE_DEG_Y) / float(self.MICROSTEP_DIV_Y) / float(self.GEAR_RATIO_Y)
@@ -1110,6 +1060,24 @@ QGroupBox::title {
 
 
     # ---------- Seçim ve adım sayacı ----------
+    def _sync_absolute_steps(self):
+        """Read exact signed pulse counters directly from both workers."""
+        self._steps_x_abs = int(self.motorX.position_steps())
+        self._steps_y_abs = int(self.motorY.position_steps())
+
+    def _position_capture_ready(self, title: str) -> bool:
+        if self.motorX.is_busy() or self.motorY.is_busy():
+            QMessageBox.warning(
+                self, title,
+                "Motor hareketi henüz tamamlanmadı. Noktayı kaydetmeden önce bekleyin.",
+            )
+            return False
+        QApplication.processEvents()
+        if self.motorX.is_busy() or self.motorY.is_busy():
+            return False
+        self._sync_absolute_steps()
+        return True
+
     def _reset_step_counters(self):
         self._sx_right = 0
         self._sx_left = 0
@@ -1127,6 +1095,8 @@ QGroupBox::title {
                 "İlk noktayı seçmek için lazeri açın ve güncel bir mesafe ölçümü bekleyin.",
             )
             return
+        if not self._position_capture_ready("Sequential Scan"):
+            return
         self._reset_area_selection()
         self._reset_sequential_selection_labels()
         self.label.start_select_first()
@@ -1135,6 +1105,7 @@ QGroupBox::title {
         self._planner_result = None
         # O anki D'yi yakala
         self._first_distance = measurement[0]
+        self._seq_first_steps = (self._steps_x_abs, self._steps_y_abs)
 
     def on_select_last_clicked(self):
         if self._scan_sequence_active:
@@ -1147,10 +1118,13 @@ QGroupBox::title {
                 "Son noktayı seçmek için lazeri açın ve güncel bir mesafe ölçümü bekleyin.",
             )
             return
+        if not self._position_capture_ready("Sequential Scan"):
+            return
         self.label.start_select_last()
         self._track_steps = False
         # O anki D'yi yakala
         self._last_distance_at_select = measurement[0]
+        self._seq_last_steps = (self._steps_x_abs, self._steps_y_abs)
 
     def _update_sequential_total(self, *_):
         total = int(self.ui.countSpin.value()) + 1
@@ -1195,8 +1169,7 @@ QGroupBox::title {
         if not self.label.pixmap():
             QMessageBox.warning(self, "Area Scan", "Kamera görüntüsü hazır değil.")
             return
-        if self.motorX.is_busy() or self.motorY.is_busy():
-            QMessageBox.warning(self, "Area Scan", "Köşeyi seçmeden önce motorun durmasını bekleyin.")
+        if not self._position_capture_ready("Area Scan"):
             return
         if self._fresh_distance_measurement() is None:
             QMessageBox.warning(
@@ -1237,6 +1210,8 @@ QGroupBox::title {
             self.label.update()
             QMessageBox.warning(self, "Area Scan", "Köşe kaydedilemedi: motor hareket ediyor.")
             return
+
+        self._sync_absolute_steps()
 
         self._area_corners[corner] = {
             "pixel": (int(x), int(y)),
@@ -1415,7 +1390,9 @@ QGroupBox::title {
         steps = int(delta)
         if steps == 0:
             return
-        self._steps_x_abs += steps
+        # Worker owns the authoritative pulse counter. Reading it here keeps
+        # delayed/batched Qt signals from making the UI-side position drift.
+        self._steps_x_abs = int(self.motorX.position_steps())
 
         if not self._track_steps:
             return
@@ -1432,7 +1409,7 @@ QGroupBox::title {
         steps = int(delta)
         if steps == 0:
             return
-        self._steps_y_abs += steps
+        self._steps_y_abs = int(self.motorY.position_steps())
 
         if not self._track_steps:
             return
@@ -1463,7 +1440,9 @@ QGroupBox::title {
            - Mevcut referansa göre Pitch/Yaw hesaplar ve yeni satır ekler.
         3) Satır tipini 'angle' olarak işaretler (Next/Scan Points buna göre çalışır).
         """
-        if self._scan_sequence_active:
+        if self._scan_sequence_active or self._programmatic_motion_active:
+            return
+        if not self._position_capture_ready("Store Point"):
             return
         self._scan_cancel_requested = False
         table = self.ui.table
@@ -1799,8 +1778,15 @@ QGroupBox::title {
         deg_per_step_x = float(self.STEP_ANGLE_DEG_X) / float(self.MICROSTEP_DIV_X) / float(self.GEAR_RATIO_X)
         deg_per_step_y = float(self.STEP_ANGLE_DEG_Y) / float(self.MICROSTEP_DIV_Y) / float(self.GEAR_RATIO_Y)
 
-        dx_steps = self._sx_right - self._sx_left
-        dy_steps = self._sy_up - self._sy_down
+        if self._seq_first_steps is None or self._seq_last_steps is None:
+            QMessageBox.warning(
+                self,
+                "Sequential Scan",
+                "İlk ve son motor konumları geçerli değil. Noktaları yeniden seçin.",
+            )
+            return
+        dx_steps = self._seq_last_steps[0] - self._seq_first_steps[0]
+        dy_steps = self._seq_last_steps[1] - self._seq_first_steps[1]
         dYaw_deg = dx_steps * deg_per_step_x
         dPitch_deg = dy_steps * deg_per_step_y
 
@@ -2226,7 +2212,10 @@ QGroupBox::title {
                     self.motorY.emergency_stop()
                     return False
                 if x_done and y_done:
-                    return x_results[x_id] and y_results[y_id]
+                    completed = x_results[x_id] and y_results[y_id]
+                    if completed:
+                        self._sync_absolute_steps()
+                    return completed
                 time.sleep(0.005)
 
             self._mark_position_unknown()

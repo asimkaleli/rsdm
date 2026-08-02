@@ -143,6 +143,27 @@ class StepperWorkerTests(unittest.TestCase):
         self.assertEqual(finished, [(forward_id, True), (reverse_id, True)])
         self.assertEqual([report[0] for report in timing_reports], [4, 2])
         self.assertTrue(all(report[1] > 0 for report in timing_reports))
+        self.assertEqual(self.worker.position_steps(), 2)
+        self.assertFalse(self.worker.is_busy())
+
+    def test_single_step_move_outputs_exactly_one_complete_pulse(self):
+        steps = []
+        finished = []
+        done = threading.Event()
+        self.worker.step.connect(steps.append)
+
+        def on_finished(move_id, completed):
+            finished.append((move_id, completed))
+            done.set()
+
+        self.worker.moveFinished.connect(on_finished)
+        move_id = self.worker.submit_move(1)
+
+        self.assertTrue(done.wait(1))
+        self.assertEqual(finished, [(move_id, True)])
+        self.assertEqual(steps, [1])
+        self.assertEqual(self.worker.position_steps(), 1)
+        self.assertEqual(self.worker._step_line.values[-2:], [1, 0])
         self.assertFalse(self.worker.is_busy())
 
     def test_cancel_reports_incomplete_and_stops_early(self):
@@ -201,23 +222,6 @@ class StepperWorkerTests(unittest.TestCase):
         self.assertGreater(first, middle)
         self.assertAlmostEqual(first, last)
 
-    def test_duplicate_jog_start_does_not_restart_acceleration(self):
-        worker = motor_control.StepperWorker(
-            motor_control.MotorPins(step=16, dir=9)
-        )
-        worker._jog = True
-        worker._jog_forward = True
-        worker._jog_steps = 42
-
-        worker.start_jog(True)
-        worker._handle_commands()
-        self.assertEqual(worker._jog_steps, 42)
-
-        worker.start_jog(False)
-        worker._handle_commands()
-        self.assertEqual(worker._jog_steps, 0)
-        self.assertFalse(worker._jog_forward)
-
     def test_inverted_dir_pin_preserves_logical_step_sign(self):
         worker = motor_control.StepperWorker(
             motor_control.MotorPins(step=13, dir=6, dir_inverted=True)
@@ -229,6 +233,7 @@ class StepperWorkerTests(unittest.TestCase):
         worker._pulse_once(edge_s=0.0005)
 
         self.assertEqual(logical_steps, [1])
+        self.assertEqual(worker.position_steps(), 1)
         self.assertEqual(worker._dir_line.values[-1], 0)
 
     def test_pulse_uses_absolute_edge_deadlines(self):
