@@ -170,10 +170,17 @@ class StepperWorkerTests(unittest.TestCase):
         class WorkerStub:
             def __init__(self):
                 self.moves = []
+                self.continuous = []
 
             def submit_move(self, signed_steps):
                 self.moves.append(signed_steps)
                 return 42
+
+            def start_continuous(self, direction):
+                self.continuous.append(("start", direction))
+
+            def stop_continuous(self):
+                self.continuous.append(("stop",))
 
         controller = object.__new__(motor_control.MotorController)
         controller.worker = WorkerStub()
@@ -182,6 +189,58 @@ class StepperWorkerTests(unittest.TestCase):
 
         self.assertEqual(move_id, 42)
         self.assertEqual(controller.worker.moves, [-1])
+
+        controller.start_continuous(1)
+        controller.stop_continuous()
+        self.assertEqual(
+            controller.worker.continuous,
+            [("start", 1), ("stop",)],
+        )
+
+    def test_continuous_move_runs_until_stop_without_partial_pulse(self):
+        self.worker.start_continuous(-1)
+        deadline = time.monotonic() + 1.0
+        while self.worker.position_steps() > -8 and time.monotonic() < deadline:
+            time.sleep(0.001)
+
+        self.assertLessEqual(self.worker.position_steps(), -8)
+        self.worker.stop_continuous()
+        deadline = time.monotonic() + 1.0
+        while self.worker.is_busy() and time.monotonic() < deadline:
+            time.sleep(0.001)
+
+        self.assertFalse(self.worker.is_busy())
+        stopped_position = self.worker.position_steps()
+        time.sleep(0.02)
+        self.assertEqual(self.worker.position_steps(), stopped_position)
+        self.assertEqual(self.worker._step_line.values[-1], 0)
+
+    def test_continuous_direction_waits_for_queued_atomic_move(self):
+        atomic_finished_at = []
+        done = threading.Event()
+
+        def on_finished(_move_id, completed):
+            if completed:
+                atomic_finished_at.append(self.worker.position_steps())
+                done.set()
+
+        self.worker.moveFinished.connect(on_finished)
+        self.worker.submit_move(-5)
+        self.worker.start_continuous(1)
+
+        self.assertTrue(done.wait(1))
+        self.assertEqual(atomic_finished_at, [-5])
+
+        deadline = time.monotonic() + 1.0
+        while self.worker.position_steps() <= -2 and time.monotonic() < deadline:
+            time.sleep(0.001)
+        self.worker.stop_continuous()
+        deadline = time.monotonic() + 1.0
+        while self.worker.is_busy() and time.monotonic() < deadline:
+            time.sleep(0.001)
+
+        self.assertFalse(self.worker.is_busy())
+        self.assertGreater(self.worker.position_steps(), -5)
 
     def test_cancel_reports_incomplete_and_stops_early(self):
         steps = []

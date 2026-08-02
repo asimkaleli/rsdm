@@ -62,6 +62,7 @@ class rsdm(QWidget):
     MOTOR_ACCELERATION_SPS2 = 400.0
     DISTANCE_MIN_FRESHNESS_S = 2.0
     MANUAL_NUDGE_STEPS = 1
+    MANUAL_HOLD_DELAY_MS = 250
 
     def __init__(self):
         super(rsdm, self).__init__()
@@ -189,12 +190,14 @@ QGroupBox::title {
         self._x_right_pressed = False
         self._y_up_pressed = False
         self._y_down_pressed = False
-        self._key_release_tokens = {
-            Qt.Key_Left: 0,
-            Qt.Key_Right: 0,
-            Qt.Key_Up: 0,
-            Qt.Key_Down: 0,
+        self._manual_hold_tokens = {
+            (axis, direction): 0
+            for axis, direction in (
+                ("x", "left"), ("x", "right"),
+                ("y", "up"), ("y", "down"),
+            )
         }
+        self._manual_continuous_axis = {"x": None, "y": None}
 
         # Sequential endpoint positions are read directly from the motor
         # workers, independently of queued Qt step-update signals.
@@ -362,18 +365,18 @@ QGroupBox::title {
         self.ui.table.model().rowsRemoved.connect(self.on_rows_removed)
 
         # Motor butonları
-        self.ui.btnRight.clicked.connect(
-            lambda: self._queue_manual_nudge("x", "right")
-        )
-        self.ui.btnLeft.clicked.connect(
-            lambda: self._queue_manual_nudge("x", "left")
-        )
-        self.ui.btnUp.clicked.connect(
-            lambda: self._queue_manual_nudge("y", "up")
-        )
-        self.ui.btnDown.clicked.connect(
-            lambda: self._queue_manual_nudge("y", "down")
-        )
+        for button, axis, direction in (
+            (self.ui.btnRight, "x", "right"),
+            (self.ui.btnLeft, "x", "left"),
+            (self.ui.btnUp, "y", "up"),
+            (self.ui.btnDown, "y", "down"),
+        ):
+            button.pressed.connect(
+                lambda a=axis, d=direction: self._begin_manual_input(a, d)
+            )
+            button.released.connect(
+                lambda a=axis, d=direction: self._end_manual_input(a, d)
+            )
 
         self.ui.cbLazer.toggled.connect(self.on_laser_toggled)
         self.ui.cbManualMeasure.toggled.connect(self.on_manual_measure_select)
@@ -394,10 +397,7 @@ QGroupBox::title {
     def on_emergency_stop_clicked(self):
         """Bekleyen/planlı hareketleri kes ve yazılımsal konumu geçersizleştir."""
         self._scan_cancel_requested = True
-        self._x_left_pressed = False
-        self._x_right_pressed = False
-        self._y_up_pressed = False
-        self._y_down_pressed = False
+        self._release_motion_keys()
         try:
             if hasattr(self, "motorX") and self.motorX:
                 self.motorX.emergency_stop()
@@ -694,7 +694,7 @@ QGroupBox::title {
 
     # ---------- Klavye olayları ----------
     def _handle_motion_key(self, key: int, pressed: bool) -> bool:
-        """Queue one pulse on each physical key press; holding does nothing."""
+        """Handle one physical arrow press plus worker-timed hold movement."""
         key_map = {
             Qt.Key_Right: ("_x_right_pressed", "x", "right"),
             Qt.Key_Left: ("_x_left_pressed", "x", "left"),
@@ -708,28 +708,26 @@ QGroupBox::title {
         was_pressed = bool(getattr(self, attr))
         setattr(self, attr, bool(pressed))
         if pressed and not was_pressed:
-            self._queue_manual_nudge(axis, direction)
+            self._begin_manual_input(axis, direction)
+        elif not pressed and was_pressed:
+            self._end_manual_input(axis, direction)
         return True
 
     def _release_motion_keys(self):
-        """Clear key latches if focus/application state changes."""
-        for key in self._key_release_tokens:
-            self._key_release_tokens[key] += 1
+        """Stop held movement if focus/application state changes."""
+        for axis, direction in tuple(self._manual_hold_tokens):
+            self._manual_hold_tokens[(axis, direction)] += 1
+        for axis in ("x", "y"):
+            if self._manual_continuous_axis.get(axis) is not None:
+                try:
+                    self._axis_motor(axis).stop_continuous()
+                except Exception:
+                    pass
+                self._manual_continuous_axis[axis] = None
         self._x_left_pressed = False
         self._x_right_pressed = False
         self._y_up_pressed = False
         self._y_down_pressed = False
-
-    def _schedule_motion_key_release(self, key: int):
-        """Debounce Linux key-repeat release/press pairs without extra pulses."""
-        self._key_release_tokens[key] += 1
-        token = self._key_release_tokens[key]
-
-        def finish_release():
-            if self._key_release_tokens.get(key) == token:
-                self._handle_motion_key(key, False)
-
-        QTimer.singleShot(40, finish_release)
 
     def eventFilter(self, watched, event):
         event_type = event.type()
@@ -738,16 +736,12 @@ QGroupBox::title {
         elif event_type in (QEvent.KeyPress, QEvent.KeyRelease):
             key = event.key()
             if key in (Qt.Key_Left, Qt.Key_Right, Qt.Key_Up, Qt.Key_Down):
-                # Auto-repeat is consumed: holding an arrow never creates a
-                # pulse train. Every new physical press queues exactly 1 pulse.
+                # OS auto-repeat is consumed; the motor worker owns hold timing.
                 if event_type == QEvent.KeyRelease:
                     if not event.isAutoRepeat():
-                        self._schedule_motion_key_release(key)
+                        self._handle_motion_key(key, False)
                     return True
                 if self.isActiveWindow() and QApplication.activeModalWidget() is None:
-                    # Any following press cancels a pending synthetic release,
-                    # even on platforms that mislabel repeat events.
-                    self._key_release_tokens[key] += 1
                     if not event.isAutoRepeat():
                         self._handle_motion_key(key, True)
                     return True
@@ -755,8 +749,6 @@ QGroupBox::title {
 
     def keyPressEvent(self, event):
         key = event.key()
-        if key in self._key_release_tokens:
-            self._key_release_tokens[key] += 1
         if (not event.isAutoRepeat()
                 and self._handle_motion_key(key, True)):
             event.accept()
@@ -765,8 +757,8 @@ QGroupBox::title {
 
     def keyReleaseEvent(self, event):
         key = event.key()
-        if not event.isAutoRepeat() and key in self._key_release_tokens:
-            self._schedule_motion_key_release(key)
+        if (not event.isAutoRepeat()
+                and self._handle_motion_key(key, False)):
             event.accept()
             return
         super(rsdm, self).keyReleaseEvent(event)
@@ -774,16 +766,62 @@ QGroupBox::title {
     def _axis_motor(self, axis: str):
         return self.motorX if axis == "x" else self.motorY
 
-    def _queue_manual_nudge(self, axis: str, direction: str):
-        """Queue exactly one driver pulse for a short button/key press."""
-        if self._programmatic_motion_active or self._scan_sequence_active:
-            return
-        sign = {
+    @staticmethod
+    def _manual_direction_sign(axis: str, direction: str) -> int:
+        return {
             ("x", "right"): -1,
             ("x", "left"): 1,
             ("y", "up"): 1,
             ("y", "down"): -1,
         }[(axis, direction)]
+
+    def _begin_manual_input(self, axis: str, direction: str):
+        """Nudge immediately, then start continuous motion after a hold delay."""
+        if self._programmatic_motion_active or self._scan_sequence_active:
+            return
+
+        opposite = (
+            "left" if direction == "right" else
+            "right" if direction == "left" else
+            "down" if direction == "up" else "up"
+        )
+        self._manual_hold_tokens[(axis, opposite)] += 1
+
+        active_direction = self._manual_continuous_axis.get(axis)
+        if active_direction is not None and active_direction != direction:
+            self._axis_motor(axis).stop_continuous()
+            self._manual_continuous_axis[axis] = None
+
+        key = (axis, direction)
+        self._manual_hold_tokens[key] += 1
+        token = self._manual_hold_tokens[key]
+        self._queue_manual_nudge(axis, direction)
+
+        def start_if_still_held():
+            if self._manual_hold_tokens.get(key) != token:
+                return
+            if self._programmatic_motion_active or self._scan_sequence_active:
+                return
+            self._mark_position_unknown()
+            self._manual_continuous_axis[axis] = direction
+            self._axis_motor(axis).start_continuous(
+                self._manual_direction_sign(axis, direction)
+            )
+
+        QTimer.singleShot(self.MANUAL_HOLD_DELAY_MS, start_if_still_held)
+
+    def _end_manual_input(self, axis: str, direction: str):
+        key = (axis, direction)
+        self._manual_hold_tokens[key] += 1
+        if self._manual_continuous_axis.get(axis) == direction:
+            self._axis_motor(axis).stop_continuous()
+            self._manual_continuous_axis[axis] = None
+
+    def _queue_manual_nudge(self, axis: str, direction: str):
+        """Queue exactly one driver pulse for a short button/key press."""
+        if self._programmatic_motion_active or self._scan_sequence_active:
+            return
+        sign = self._manual_direction_sign(axis, direction)
         self._mark_position_unknown()
         self._axis_motor(axis).move_signed_steps(
             sign * max(1, int(self.MANUAL_NUDGE_STEPS))

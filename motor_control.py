@@ -117,6 +117,9 @@ class StepperWorker(QObject):
         self._forward = True
         # [move_id, remaining_steps, total_steps, completed_steps]
         self._active_move = None
+        self._continuous_requested_direction = 0
+        self._continuous_direction = 0
+        self._continuous_completed = 0
         self._moves = deque()     # (move_id, signed_steps)
         self._commands = deque()
         self._condition = Condition()
@@ -233,6 +236,17 @@ class StepperWorker(QObject):
         current_sps = max(1.0, min(target_sps, accel_sps, decel_sps))
         return 1.0 / (2.0 * current_sps)
 
+    def _continuous_edge_s(self) -> float:
+        """Accelerate a held manual move without relying on GUI key repeat."""
+        target_sps = 1.0 / (2.0 * self._edge_s)
+        start_sps = min(target_sps, max(1.0, self._start_sps))
+        acceleration = max(1.0, self._acceleration_sps2)
+        current_sps = math.sqrt(
+            start_sps * start_sps
+            + 2.0 * acceleration * self._continuous_completed
+        )
+        return 1.0 / (2.0 * min(target_sps, current_sps))
+
     def _set_busy(self, busy: bool):
         busy = bool(busy)
         with self._state_lock:
@@ -245,7 +259,7 @@ class StepperWorker(QObject):
         """Queue without touching GPIO from the caller's thread."""
         with self._condition:
             self._commands.append((name, args))
-            if name == "move":
+            if name in ("move", "continuous_start"):
                 self._set_busy(True)
             self._condition.notify()
 
@@ -261,6 +275,35 @@ class StepperWorker(QObject):
             self._set_busy(True)
             self._condition.notify()
         return move_id
+
+    def start_continuous(self, direction: int):
+        """Start a worker-timed manual move; direction must be -1 or +1."""
+        direction = 1 if int(direction) > 0 else -1
+        self._queue_command("continuous_start", direction)
+
+    def stop_continuous(self):
+        """Stop after the currently executing pulse has completed."""
+        self._queue_command("continuous_stop")
+
+    def _stop_continuous_in_worker(self):
+        self._continuous_requested_direction = 0
+        if not self._continuous_direction:
+            return
+        self._continuous_direction = 0
+        self._continuous_completed = 0
+        self._emit_step_update(force=True)
+        self._emit_timing_report()
+
+    def _start_requested_continuous_in_worker(self):
+        direction = self._continuous_requested_direction
+        if not direction or self._continuous_direction:
+            return
+        self._continuous_direction = direction
+        self._continuous_completed = 0
+        self._reset_timing()
+        self._wake(True)
+        self._forward = direction > 0
+        self._apply_dir()
 
     def _cancel_moves_in_worker(self):
         cancelled = []
@@ -297,9 +340,18 @@ class StepperWorker(QObject):
             elif name == "move":
                 move_id, signed_steps = int(args[0]), int(args[1])
                 self._moves.append((move_id, signed_steps))
+            elif name == "continuous_start":
+                direction = 1 if int(args[0]) > 0 else -1
+                if self._continuous_direction and self._continuous_direction != direction:
+                    self._stop_continuous_in_worker()
+                self._continuous_requested_direction = direction
+            elif name == "continuous_stop":
+                self._stop_continuous_in_worker()
             elif name == "cancel_moves":
+                self._stop_continuous_in_worker()
                 self._cancel_moves_in_worker()
             elif name == "emergency_stop":
+                self._stop_continuous_in_worker()
                 self._cancel_moves_in_worker()
             elif name == "reset":
                 if self.shared:
@@ -310,10 +362,12 @@ class StepperWorker(QObject):
                 if self.shared:
                     self.shared.set_sleep(not bool(args[0]))
                 if args[0]:
+                    self._stop_continuous_in_worker()
                     self._cancel_moves_in_worker()
             elif name == "enable":
                 self._enable(bool(args[0]))
             elif name == "shutdown":
+                self._stop_continuous_in_worker()
                 self._cancel_moves_in_worker()
                 self._emit_step_update(force=True)
                 self._run = False
@@ -367,6 +421,10 @@ class StepperWorker(QObject):
                     self._apply_dir()
                     self.moveStarted.emit(move_id, signed_steps)
 
+                if (self._active_move is None and not self._moves
+                        and not self._continuous_direction):
+                    self._start_requested_continuous_in_worker()
+
                 if self._active_move is not None:
                     edge_s = self._profile_edge_s(
                         self._active_move[3], self._active_move[1]
@@ -380,6 +438,9 @@ class StepperWorker(QObject):
                         self._emit_step_update(force=True)
                         self._emit_timing_report()
                         self.moveFinished.emit(move_id, True)
+                elif self._continuous_direction:
+                    self._pulse_once(edge_s=self._continuous_edge_s())
+                    self._continuous_completed += 1
                 else:
                     with self._condition:
                         if not self._commands:
@@ -390,6 +451,8 @@ class StepperWorker(QObject):
                     pending_commands = bool(self._commands)
                     self._set_busy(bool(
                         self._active_move is not None or self._moves
+                        or self._continuous_direction
+                        or self._continuous_requested_direction
                         or pending_commands
                     ))
         except Exception as exc:
@@ -454,6 +517,12 @@ class MotorController(QObject):
     def move_signed_steps(self, signed_steps: int) -> int:
         """Preferred atomic movement API."""
         return self.worker.submit_move(int(signed_steps))
+
+    def start_continuous(self, direction: int):
+        self.worker.start_continuous(direction)
+
+    def stop_continuous(self):
+        self.worker.stop_continuous()
 
     def reset_pulse(self):
         self.worker.reset_pulse()
