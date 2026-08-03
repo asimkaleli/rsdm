@@ -5,7 +5,6 @@ append commands to a protected queue, so direction and step count cannot be
 separated by a race.
 """
 
-import math
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -114,14 +113,11 @@ class StepperWorker(QObject):
         self._dir_line = _req_out(pins.dir, 0)
 
         self._edge_s = 0.005
-        self._start_sps = 50.0
-        self._acceleration_sps2 = 400.0
         self._forward = True
-        # [move_id, remaining_steps, total_steps, completed_steps]
+        # [move_id, remaining_steps]
         self._active_move = None
         self._continuous_requested_direction = 0
         self._continuous_direction = 0
-        self._continuous_completed = 0
         self._moves = deque()     # (move_id, signed_steps)
         self._commands = deque()
         self._condition = Condition()
@@ -270,26 +266,9 @@ class StepperWorker(QObject):
             )
         self._reset_timing()
 
-    def _profile_edge_s(self, completed: int, remaining: int) -> float:
-        """Trapezoidal/triangular profile expressed as pulse edge duration."""
-        target_sps = 1.0 / (2.0 * self._edge_s)
-        start_sps = min(target_sps, max(1.0, self._start_sps))
-        acceleration = max(1.0, self._acceleration_sps2)
-        accel_sps = math.sqrt(start_sps * start_sps + 2.0 * acceleration * completed)
-        decel_sps = math.sqrt(start_sps * start_sps + 2.0 * acceleration * max(0, remaining - 1))
-        current_sps = max(1.0, min(target_sps, accel_sps, decel_sps))
-        return 1.0 / (2.0 * current_sps)
-
-    def _continuous_edge_s(self) -> float:
-        """Accelerate a held manual move without relying on GUI key repeat."""
-        target_sps = 1.0 / (2.0 * self._edge_s)
-        start_sps = min(target_sps, max(1.0, self._start_sps))
-        acceleration = max(1.0, self._acceleration_sps2)
-        current_sps = math.sqrt(
-            start_sps * start_sps
-            + 2.0 * acceleration * self._continuous_completed
-        )
-        return 1.0 / (2.0 * min(target_sps, current_sps))
+    def _movement_edge_s(self) -> float:
+        """Use the selected fixed speed for manual and planned movements."""
+        return self._edge_s
 
     def _set_busy(self, busy: bool):
         busy = bool(busy)
@@ -334,7 +313,6 @@ class StepperWorker(QObject):
         if not self._continuous_direction:
             return
         self._continuous_direction = 0
-        self._continuous_completed = 0
         self._emit_step_update(force=True)
         self._emit_timing_report()
 
@@ -343,7 +321,6 @@ class StepperWorker(QObject):
         if not direction or self._continuous_direction:
             return
         self._continuous_direction = direction
-        self._continuous_completed = 0
         self._reset_timing()
         self._wake(True)
         self._forward = direction > 0
@@ -373,9 +350,6 @@ class StepperWorker(QObject):
         for name, args in commands:
             if name == "speed":
                 self._edge_s = max(0.0005, float(args[0]) / 1000.0)
-            elif name == "motion_profile":
-                self._start_sps = max(1.0, float(args[0]))
-                self._acceleration_sps2 = max(1.0, float(args[1]))
             elif name == "microstep":
                 if self.shared:
                     self.shared.set_microstep(args[0])
@@ -420,9 +394,6 @@ class StepperWorker(QObject):
     def set_speed_ms(self, ms_per_edge: float):
         self._queue_command("speed", float(ms_per_edge))
 
-    def set_motion_profile(self, start_sps: float, acceleration_sps2: float):
-        self._queue_command("motion_profile", float(start_sps), float(acceleration_sps2))
-
     @Slot(str)
     def set_microstep(self, mode: str):
         self._queue_command("microstep", str(mode))
@@ -458,7 +429,7 @@ class StepperWorker(QObject):
                 if self._active_move is None and self._moves:
                     move_id, signed_steps = self._moves.popleft()
                     total_steps = abs(signed_steps)
-                    self._active_move = [move_id, total_steps, total_steps, 0]
+                    self._active_move = [move_id, total_steps]
                     self._reset_timing()
                     self._wake(True)
                     self._forward = signed_steps > 0
@@ -470,12 +441,8 @@ class StepperWorker(QObject):
                     self._start_requested_continuous_in_worker()
 
                 if self._active_move is not None:
-                    edge_s = self._profile_edge_s(
-                        self._active_move[3], self._active_move[1]
-                    )
-                    self._pulse_once(edge_s=edge_s)
+                    self._pulse_once(edge_s=self._movement_edge_s())
                     self._active_move[1] -= 1
-                    self._active_move[3] += 1
                     if self._active_move[1] <= 0:
                         move_id = self._active_move[0]
                         self._active_move = None
@@ -483,8 +450,7 @@ class StepperWorker(QObject):
                         self._emit_timing_report()
                         self.moveFinished.emit(move_id, True)
                 elif self._continuous_direction:
-                    self._pulse_once(edge_s=self._continuous_edge_s())
-                    self._continuous_completed += 1
+                    self._pulse_once(edge_s=self._movement_edge_s())
                 else:
                     with self._condition:
                         if not self._commands:
@@ -556,9 +522,6 @@ class MotorController(QObject):
 
     def set_microstep(self, mode: str):
         self.worker.set_microstep(mode)
-
-    def set_motion_profile(self, start_sps: float, acceleration_sps2: float):
-        self.worker.set_motion_profile(start_sps, acceleration_sps2)
 
     def cancel_moves(self):
         self.worker.cancel_moves()

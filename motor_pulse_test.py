@@ -134,7 +134,6 @@ def main() -> int:
             axis_config = AXES[axis_name]
             motor = MotorController(axis_config["pins"], shared=shared)
             motors[axis_name] = motor
-            motor.set_motion_profile(50.0, 400.0)
             motor.set_speed_ms(1000.0 / (2.0 * args.speed_sps))
             motor.set_microstep("SIXTEENTH")
             motor.set_step_callback(

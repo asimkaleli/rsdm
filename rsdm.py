@@ -56,10 +56,6 @@ class rsdm(QWidget):
     MICROSTEP_DIV_Y = 16
     GEAR_RATIO_Y = 10
 
-    # Motion profile. The combo box remains the target speed; motors ramp from
-    # this start speed using the configured acceleration.
-    MOTOR_START_SPS = 50.0
-    MOTOR_ACCELERATION_SPS2 = 400.0
     DISTANCE_MIN_FRESHNESS_S = 2.0
 
     def __init__(self):
@@ -148,8 +144,6 @@ QGroupBox::title {
             self.motorY = MotorController(
                 MotorPins(step=12, dir=5, dir_inverted=True), shared=self.shared
             )  # Pitch ~ yukarı/aşağı
-            self.motorX.set_motion_profile(self.MOTOR_START_SPS, self.MOTOR_ACCELERATION_SPS2)
-            self.motorY.set_motion_profile(self.MOTOR_START_SPS, self.MOTOR_ACCELERATION_SPS2)
 
             # Adım sayaç/durum (seçim aralığını ölçmek için)
             self._track_steps = False

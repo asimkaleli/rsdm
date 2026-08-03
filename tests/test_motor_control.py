@@ -106,7 +106,6 @@ class StepperWorkerTests(unittest.TestCase):
             motor_control.MotorPins(step=12, dir=5)
         )
         self.worker.set_speed_ms(0.5)
-        self.worker.set_motion_profile(1000, 100000)
         self.thread = threading.Thread(target=self.worker.run, daemon=True)
         self.thread.start()
 
@@ -287,16 +286,10 @@ class StepperWorkerTests(unittest.TestCase):
             sorted(results), sorted([(first_id, False), (second_id, False)])
         )
 
-    def test_motion_profile_accelerates_and_decelerates(self):
-        self.worker._edge_s = 0.0005  # 1000 step/s target
-        self.worker._start_sps = 50
-        self.worker._acceleration_sps2 = 400
-        first = self.worker._profile_edge_s(completed=0, remaining=2000)
-        middle = self.worker._profile_edge_s(completed=1000, remaining=1000)
-        last = self.worker._profile_edge_s(completed=1999, remaining=1)
+    def test_manual_and_planned_moves_share_the_selected_fixed_speed(self):
+        self.worker._edge_s = 0.00125  # 400 step/s
 
-        self.assertGreater(first, middle)
-        self.assertAlmostEqual(first, last)
+        self.assertEqual(self.worker._movement_edge_s(), 0.00125)
 
     def test_inverted_dir_pin_preserves_logical_step_sign(self):
         worker = motor_control.StepperWorker(
