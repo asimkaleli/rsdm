@@ -143,11 +143,11 @@ QGroupBox::title {
 
             # 2) Motorlar
             self.motorX = MotorController(
-                MotorPins(step=13, dir=6), shared=self.shared
-            )  # Yaw ~ sağ/sol; fiziksel motor artık ikinci sürücü kanalında
-            self.motorY = MotorController(
                 MotorPins(step=12, dir=5, dir_inverted=True), shared=self.shared
-            )  # Pitch ~ yukarı/aşağı; fiziksel motor artık birinci sürücü kanalında
+            )  # Yaw ~ sağ/sol
+            self.motorY = MotorController(
+                MotorPins(step=13, dir=6), shared=self.shared
+            )  # Pitch ~ yukarı/aşağı
             self.motorX.set_motion_profile(self.MOTOR_START_SPS, self.MOTOR_ACCELERATION_SPS2)
             self.motorY.set_motion_profile(self.MOTOR_START_SPS, self.MOTOR_ACCELERATION_SPS2)
 

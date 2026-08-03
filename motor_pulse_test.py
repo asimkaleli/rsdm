@@ -20,12 +20,12 @@ from motor_control import MotorController, MotorPins, SharedPins
 
 AXES = {
     "x": {
-        "pins": MotorPins(step=13, dir=6),
+        "pins": MotorPins(step=12, dir=5, dir_inverted=True),
         "positive_name": "left",
         "negative_name": "right",
     },
     "y": {
-        "pins": MotorPins(step=12, dir=5, dir_inverted=True),
+        "pins": MotorPins(step=13, dir=6),
         "positive_name": "up",
         "negative_name": "down",
     },
