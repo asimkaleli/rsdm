@@ -203,24 +203,62 @@ def main() -> int:
             )
         shared.set_enable(True)
         laser = LaserGPIO(line=24)
-        laser.set_enabled(False)
+        print("UYARI: GPIO24 lazeri test boyunca acik kalacak; goz hizasina bakmayin.")
+        laser.set_enabled(True)
+        record("laser_on")
+
+        # Ana uygulamadaki sirayi koru: once lazeri ac, ardindan cihaz
+        # hazirlandiktan sonra Dimetix worker'i baslat.
+        print("Lazer acildi. Dimetix icin 1.5 saniye hazirlanma bekleniyor...")
+        warmup_deadline = time.monotonic() + 1.5
+        while time.monotonic() < warmup_deadline:
+            app.processEvents()
+            time.sleep(0.01)
 
         dim_worker = DimetixWorker(interval_ms=DIMETIX_PERIOD_MS)
         dim_worker.distance.connect(on_dimetix_distance)
         dim_worker.error.connect(on_dimetix_error)
         dim_worker.set_distance_command(f"s0h+{DIMETIX_PERIOD_MS}")
         dim_worker.set_mode_distance()
-        dim_worker.start()
 
-        dimetix_deadline = time.monotonic() + 10.0
-        while time.monotonic() < dimetix_deadline and not dimetix_state["seen"]:
+        max_dimetix_attempts = 3
+        for attempt in range(1, max_dimetix_attempts + 1):
+            print(
+                f"Dimetix baglanti denemesi "
+                f"{attempt}/{max_dimetix_attempts}..."
+            )
+            dim_worker.start()
+            dimetix_deadline = time.monotonic() + 10.0
+            while (
+                time.monotonic() < dimetix_deadline
+                and not dimetix_state["seen"]
+            ):
+                app.processEvents()
+                if not dim_worker.isRunning():
+                    break
+                time.sleep(0.01)
+
             app.processEvents()
-            if not dim_worker.isRunning():
+            if dimetix_state["seen"]:
                 break
-            time.sleep(0.01)
+
+            if dim_worker.isRunning():
+                dim_worker.stop()
+                if not dim_worker.wait(5000):
+                    raise RuntimeError(
+                        "Dimetix baglanti denemesi guvenli bicimde durdurulamadi."
+                    )
+
+            if attempt < max_dimetix_attempts:
+                retry_deadline = time.monotonic() + 1.0
+                while time.monotonic() < retry_deadline:
+                    app.processEvents()
+                    time.sleep(0.01)
+
         if not dimetix_state["seen"]:
             raise RuntimeError(
-                "Dimetix 50 ms mesafe modu baslatilamadi; motor testi iptal edildi."
+                "Dimetix 50 ms mesafe modu 3 denemede baslatilamadi; "
+                "motor testi iptal edildi."
             )
         record(
             "dimetix_ready",
@@ -237,12 +275,9 @@ def main() -> int:
                 f"+ {args.steps} {axis_config['negative_name']}"
             )
         print("UYARI: " + "; ".join(movements))
-        print("UYARI: GPIO24 lazeri test boyunca acik kalacak; goz hizasina bakmayin.")
         print(f"Hiz: {args.speed_sps:g} step/s  Log: {output}")
-        laser.set_enabled(True)
-        record("laser_on")
         print(
-            "Lazer acildi. Baslangic noktasini isaretleyin; hareket 3 saniye "
+            "Baslangic noktasini isaretleyin; hareket 3 saniye "
             "sonra baslayacak. Ctrl+C ile iptal edebilirsiniz."
         )
         for remaining in (3, 2, 1):
