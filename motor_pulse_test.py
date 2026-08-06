@@ -14,8 +14,12 @@ import time
 
 from PySide2.QtCore import QCoreApplication
 
+from dimetix_worker import DimetixWorker
 from laser_gpio import LaserGPIO
 from motor_control import MotorController, MotorPins, SharedPins
+
+
+DIMETIX_PERIOD_MS = 50
 
 
 AXES = {
@@ -97,8 +101,14 @@ def main() -> int:
     shared = None
     motors = {}
     laser = None
+    dim_worker = None
     rows = []
     move_results = {}
+    dimetix_state = {
+        "seen": False,
+        "distance": None,
+        "unit": "",
+    }
     active_state = {"axis": selected_axes[0], "phase": "setup"}
 
     def record(event, **values):
@@ -123,7 +133,32 @@ def main() -> int:
             "min_low_ms": values.get("min_low_ms", ""),
             "max_low_ms": values.get("max_low_ms", ""),
             "completed": values.get("completed", ""),
+            "distance": values.get("distance", ""),
+            "unit": values.get("unit", ""),
+            "message": values.get("message", ""),
         })
+
+    def on_dimetix_distance(value: float, unit: str):
+        first_measurement = not dimetix_state["seen"]
+        dimetix_state["seen"] = True
+        dimetix_state["distance"] = float(value)
+        dimetix_state["unit"] = unit or ""
+        record(
+            "dimetix_distance",
+            distance=f"{float(value):.4f}",
+            unit=unit or "",
+        )
+        if first_measurement:
+            port = dim_worker.port if dim_worker is not None else None
+            print(
+                f"Dimetix aktif: port={port or '?'} "
+                f"period={DIMETIX_PERIOD_MS} ms"
+            )
+
+    def on_dimetix_error(message: str):
+        text = str(message)
+        record("dimetix_error", message=text)
+        print(f"[Dimetix] {text}")
 
     try:
         shared = SharedPins(
@@ -169,6 +204,30 @@ def main() -> int:
         shared.set_enable(True)
         laser = LaserGPIO(line=24)
         laser.set_enabled(False)
+
+        dim_worker = DimetixWorker(interval_ms=DIMETIX_PERIOD_MS)
+        dim_worker.distance.connect(on_dimetix_distance)
+        dim_worker.error.connect(on_dimetix_error)
+        dim_worker.set_distance_command(f"s0h+{DIMETIX_PERIOD_MS}")
+        dim_worker.set_mode_distance()
+        dim_worker.start()
+
+        dimetix_deadline = time.monotonic() + 10.0
+        while time.monotonic() < dimetix_deadline and not dimetix_state["seen"]:
+            app.processEvents()
+            if not dim_worker.isRunning():
+                break
+            time.sleep(0.01)
+        if not dimetix_state["seen"]:
+            raise RuntimeError(
+                "Dimetix 50 ms mesafe modu baslatilamadi; motor testi iptal edildi."
+            )
+        record(
+            "dimetix_ready",
+            distance=f"{dimetix_state['distance']:.4f}",
+            unit=dimetix_state["unit"],
+            message=f"period_ms={DIMETIX_PERIOD_MS}",
+        )
 
         movements = []
         for axis_name in selected_axes:
@@ -266,6 +325,14 @@ def main() -> int:
                 laser.release()
             except Exception:
                 pass
+        if dim_worker is not None:
+            try:
+                dim_worker.set_mode_off()
+                dim_worker.stop()
+                if not dim_worker.wait(5000):
+                    print("Dimetix worker 5 saniyede durmadi.")
+            except Exception as exc:
+                print(f"Dimetix kapatma hatasi: {exc}")
         for motor in motors.values():
             motor.shutdown()
         if rows:
