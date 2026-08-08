@@ -94,6 +94,40 @@ def planned_move_steps(
     )
 
 
+def anchored_step_targets(
+    pitch_steps_delta, yaw_steps_delta, anchor_row: int,
+    anchor_x_steps: int, anchor_y_steps: int,
+) -> Tuple[List[int], List[int]]:
+    """Convert path deltas to exact absolute motor targets.
+
+    Motor X is yaw and motor Y is pitch. ``anchor_row`` is a path row whose
+    real worker pulse counters were captured by the GUI. Building every row
+    from that anchor avoids deriving a target from rounded table text or from
+    an assumed previous segment position.
+    """
+    pitch_delta = [int(value) for value in pitch_steps_delta]
+    yaw_delta = [int(value) for value in yaw_steps_delta]
+    if len(pitch_delta) != len(yaw_delta):
+        raise ValueError("Planner step delta lengths do not match.")
+    point_count = len(pitch_delta) + 1
+    anchor_row = int(anchor_row)
+    if not 0 <= anchor_row < point_count:
+        raise IndexError("Anchor row is outside the path.")
+
+    x_targets = [None] * point_count
+    y_targets = [None] * point_count
+    x_targets[anchor_row] = int(anchor_x_steps)
+    y_targets[anchor_row] = int(anchor_y_steps)
+
+    for row in range(anchor_row, point_count - 1):
+        x_targets[row + 1] = x_targets[row] + yaw_delta[row]
+        y_targets[row + 1] = y_targets[row] + pitch_delta[row]
+    for row in range(anchor_row - 1, -1, -1):
+        x_targets[row] = x_targets[row + 1] - yaw_delta[row]
+        y_targets[row] = y_targets[row + 1] - pitch_delta[row]
+    return x_targets, y_targets
+
+
 def _dpy_to_step_deltas(dpy_list, stepper_pitch, stepper_yaw):
     """Quantize absolute targets first so rounding cannot accumulate."""
     if len(dpy_list) < 2:

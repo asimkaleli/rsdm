@@ -1,7 +1,8 @@
 import unittest
 
 from laser_path_planner import (
-    StepperConfig, _dpy_to_step_deltas, plan_grid_path, planned_move_steps,
+    StepperConfig, _dpy_to_step_deltas, anchored_step_targets,
+    plan_grid_path, planned_move_steps,
 )
 
 
@@ -109,6 +110,36 @@ class GridPlannerTests(unittest.TestCase):
         pitch_delta, yaw_delta = _dpy_to_step_deltas(dpy, cfg, cfg)
         self.assertEqual(sum(pitch_delta), 10)
         self.assertEqual(sum(yaw_delta), 0)
+
+    def test_absolute_targets_can_be_anchored_at_last_point(self):
+        x_targets, y_targets = anchored_step_targets(
+            pitch_steps_delta=[10, -20, 5],
+            yaw_steps_delta=[30, 40, -15],
+            anchor_row=3,
+            anchor_x_steps=1000,
+            anchor_y_steps=-500,
+        )
+        self.assertEqual(x_targets, [945, 975, 1015, 1000])
+        self.assertEqual(y_targets, [-495, -485, -505, -500])
+        self.assertEqual(x_targets[3], 1000)
+        self.assertEqual(y_targets[3], -500)
+
+    def test_absolute_targets_can_be_anchored_at_first_point(self):
+        x_targets, y_targets = anchored_step_targets(
+            pitch_steps_delta=[7, -2],
+            yaw_steps_delta=[-4, 9],
+            anchor_row=0,
+            anchor_x_steps=120,
+            anchor_y_steps=350,
+        )
+        self.assertEqual(x_targets, [120, 116, 125])
+        self.assertEqual(y_targets, [350, 357, 355])
+
+    def test_absolute_target_anchor_validation(self):
+        with self.assertRaises(ValueError):
+            anchored_step_targets([1], [1, 2], 0, 0, 0)
+        with self.assertRaises(IndexError):
+            anchored_step_targets([1], [2], 2, 0, 0)
 
 
 if __name__ == "__main__":

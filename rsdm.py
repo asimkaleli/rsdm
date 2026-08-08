@@ -37,12 +37,14 @@ from motor_control import MotorController, MotorPins, SharedPins
 
 # Yalnızca planlayıcıyı kullanacağız (fallback yok)
 from laser_path_planner import (
-    plan_grid_path, plan_laser_path, planned_move_steps, StepperConfig,
+    anchored_step_targets, plan_grid_path, plan_laser_path, StepperConfig,
 )
 
 from datetime import datetime
 
 T = TypeVar("T")
+TARGET_X_STEPS_ROLE = Qt.UserRole + 1
+TARGET_Y_STEPS_ROLE = Qt.UserRole + 2
 
 class rsdm(QWidget):
     # ----------- KALİBRASYON (kendine göre güncelle) -----------
@@ -993,6 +995,56 @@ QGroupBox::title {
                 rows.append(r)
         return rows
 
+    @staticmethod
+    def _set_step_target_data(pitch_item, yaw_item, x_steps: int, y_steps: int):
+        """Attach exact worker pulse coordinates to a visible table row."""
+        for item in (pitch_item, yaw_item):
+            item.setData(TARGET_X_STEPS_ROLE, int(x_steps))
+            item.setData(TARGET_Y_STEPS_ROLE, int(y_steps))
+
+    def _row_step_target(self, row: int):
+        item = self.ui.table.item(row, 0)
+        if item is None:
+            return None
+        x_steps = item.data(TARGET_X_STEPS_ROLE)
+        y_steps = item.data(TARGET_Y_STEPS_ROLE)
+        if x_steps is None or y_steps is None:
+            return None
+        return int(x_steps), int(y_steps)
+
+    def _move_to_step_target(self, row: int, target_x: int, target_y: int,
+                             target_kind: str) -> bool:
+        """Move from live worker counters to one exact absolute target."""
+        if self.motorX.is_busy() or self.motorY.is_busy():
+            QMessageBox.warning(self, "Motor Meşgul", "Motor hareketi devam ediyor.")
+            return False
+        self._sync_absolute_steps()
+        current_x, current_y = self._steps_x_abs, self._steps_y_abs
+        target_x, target_y = int(target_x), int(target_y)
+        delta_x = target_x - current_x
+        delta_y = target_y - current_y
+        print(
+            f"[step-target-{target_kind}] row={row} "
+            f"current=({current_x},{current_y}) "
+            f"target=({target_x},{target_y}) "
+            f"delta=({delta_x:+d},{delta_y:+d})"
+        )
+        sys.stdout.flush()
+        if not self._move_both_signed_and_wait(
+                delta_x, delta_y, timeout_ms=300000):
+            return False
+        self._sync_absolute_steps()
+        reached = (self._steps_x_abs == target_x
+                   and self._steps_y_abs == target_y)
+        print(
+            f"[step-target-{target_kind}] row={row} "
+            f"reached=({self._steps_x_abs},{self._steps_y_abs}) ok={reached}"
+        )
+        sys.stdout.flush()
+        if not reached:
+            self._mark_position_unknown()
+        return reached
+
     def _goto_angle_row(self, row: int, wait_s: float = 0.0) -> bool:
         """
         Verilen açı satırına (Pitch,Yaw) gidecek şekilde motorları hareket ettirir.
@@ -1005,47 +1057,17 @@ QGroupBox::title {
         if pitch_item is None or yaw_item is None:
             return False
 
-        try:
-            pitch_deg = float(pitch_item.text())
-            yaw_deg   = float(yaw_item.text())
-        except ValueError:
-            QMessageBox.warning(self, "Hata", f"Row {row} için geçersiz açı değeri.")
+        target = self._row_step_target(row)
+        if target is None:
+            QMessageBox.warning(
+                self, "Hata", f"Row {row} için kesin step hedefi bulunmuyor."
+            )
             return False
-
-        if self._origin_steps_x is None or self._origin_steps_y is None:
-            QMessageBox.warning(self, "Hata", "Önce en az bir pvStorePoint ile referans belirleyin.")
-            return False
-
-        if self.motorX.is_busy() or self.motorY.is_busy():
-            QMessageBox.warning(self, "Motor Meşgul", "Motor hareketi devam ediyor.")
-            return False
-        self._sync_absolute_steps()
-
-        # step/deg oranları
-        deg_per_step_x = float(self.STEP_ANGLE_DEG_X) / float(self.MICROSTEP_DIV_X) / float(self.GEAR_RATIO_X)
-        deg_per_step_y = float(self.STEP_ANGLE_DEG_Y) / float(self.MICROSTEP_DIV_Y) / float(self.GEAR_RATIO_Y)
-
-        # Hedef step (origin'e göre)
-        target_dx_steps = int(round(yaw_deg   / deg_per_step_x))
-        target_dy_steps = int(round(pitch_deg / deg_per_step_y))
-
-        # Mevcut step (origin'e göre)
-        cur_dx_steps = self._steps_x_abs - self._origin_steps_x
-        cur_dy_steps = self._steps_y_abs - self._origin_steps_y
-
-        # Gidilmesi gereken delta
-        delta_x = target_dx_steps - cur_dx_steps  # MotorX (Yaw)
-        delta_y = target_dy_steps - cur_dy_steps  # MotorY (Pitch)
-
-        print(f"[goto_angle_row] row={row}  Pitch={pitch_deg:.4f}°  Yaw={yaw_deg:.4f}°")
-        print(f"    cur_dx={cur_dx_steps}  target_dx={target_dx_steps}  delta_x={delta_x}")
-        print(f"    cur_dy={cur_dy_steps}  target_dy={target_dy_steps}  delta_y={delta_y}")
-        sys.stdout.flush()
 
         # --- HAREKETTEN ÖNCE: log satırını temizle ---
         self._clear_log_target()
 
-        if not self._move_both_signed_and_wait(delta_x, delta_y, timeout_ms=300000):
+        if not self._move_to_step_target(row, target[0], target[1], "stored"):
             QMessageBox.critical(self, "Tarama Hatası",
                                  f"Row {row} konumuna hareket tamamlanamadı.")
             return False
@@ -1337,6 +1359,13 @@ QGroupBox::title {
         if not dpy or len(dpy) != len(grid_indices):
             QMessageBox.critical(self, "Area Scan", "Alan planı hedef listesi geçersiz.")
             return
+        target_x_steps, target_y_steps = anchored_step_targets(
+            result.get("pitch_steps_delta", []),
+            result.get("yaw_steps_delta", []),
+            0, d_corner["steps_x"], d_corner["steps_y"],
+        )
+        result["target_x_steps"] = target_x_steps
+        result["target_y_steps"] = target_y_steps
 
         self.table.setRowCount(0)
         self.label.markers.clear()
@@ -1350,6 +1379,10 @@ QGroupBox::title {
             yaw_item = QTableWidgetItem(f"{yaw:.4f}")
             pitch_item.setData(Qt.UserRole, "grid")
             yaw_item.setData(Qt.UserRole, "grid")
+            self._set_step_target_data(
+                pitch_item, yaw_item,
+                target_x_steps[row], target_y_steps[row],
+            )
             self.table.insertRow(row)
             self.table.setItem(row, 0, pitch_item)
             self.table.setItem(row, 1, yaw_item)
@@ -1521,9 +1554,15 @@ QGroupBox::title {
         # Bu satırın "açı satırı" olduğunu işaretle
         pitch_item.setData(Qt.UserRole, "stored_angle")
         yaw_item.setData(Qt.UserRole, "stored_angle")
+        self._set_step_target_data(pitch_item, yaw_item, sx, sy)
 
         table.setItem(row, 0, pitch_item)
         table.setItem(row, 1, yaw_item)
+        print(
+            f"[store-point] row={row} absolute=({sx},{sy}) "
+            f"relative=({sx - self._origin_steps_x},{sy - self._origin_steps_y})"
+        )
+        sys.stdout.flush()
 
         # Silme butonu ekle (3. sütun)
         btn = self._make_delete_btn(framed=True)
@@ -1867,6 +1906,12 @@ QGroupBox::title {
                 "Planner hedef sayısı tablo satır sayısıyla eşleşmiyor.",
             )
             return
+        target_x_steps, target_y_steps = anchored_step_targets(
+            dp, dy, len(dpy) - 1,
+            self._seq_last_steps[0], self._seq_last_steps[1],
+        )
+        result["target_x_steps"] = target_x_steps
+        result["target_y_steps"] = target_y_steps
 
         # Fotoğraf marker'ları piksel konumlarını ayrı listede tutar. Tabloda
         # ise kullanıcının göreceği gerçek hedef Pitch/Yaw açıları bulunur.
@@ -1875,6 +1920,10 @@ QGroupBox::title {
             yaw_item = QTableWidgetItem(f"{yaw:.4f}")
             pitch_item.setData(Qt.UserRole, "sequential")
             yaw_item.setData(Qt.UserRole, "sequential")
+            self._set_step_target_data(
+                pitch_item, yaw_item,
+                target_x_steps[row], target_y_steps[row],
+            )
             self.table.setItem(row, 0, pitch_item)
             self.table.setItem(row, 1, yaw_item)
 
@@ -1948,6 +1997,8 @@ QGroupBox::title {
 
         pitch_d = list(self._planner_result.get("pitch_steps_delta", []))
         yaw_d = list(self._planner_result.get("yaw_steps_delta", []))
+        target_x_steps = list(self._planner_result.get("target_x_steps", []))
+        target_y_steps = list(self._planner_result.get("target_y_steps", []))
         dpy = list(self._planner_result.get("dpy", []))
         plan_type = str(self._planner_result.get("plan_type", "sequential"))
         scan_step = int(self._planner_result.get("scan_step", -1))
@@ -1961,6 +2012,10 @@ QGroupBox::title {
         total_seg = len(pitch_d)
         if len(dpy) != total_seg + 1:
             QMessageBox.critical(self, "Hata", "Planner hedef açı listesi uyumsuz.")
+            return
+        if (len(target_x_steps) != len(dpy)
+                or len(target_y_steps) != len(dpy)):
+            QMessageBox.critical(self, "Hata", "Kesin step hedef listesi uyumsuz.")
             return
 
         if (self._current_point_kind != plan_type
@@ -1979,24 +2034,15 @@ QGroupBox::title {
 
         current_row = self._current_point_row
         target_row = current_row + scan_step
-        move_yaw, move_pitch, segment = planned_move_steps(
-            pitch_d, yaw_d, current_row, target_row
-        )
-
-        print(
-            f"[NextPoint-{plan_type}] {current_row}→{target_row} "
-            f"dYaw_steps={move_yaw:+d} dPitch_steps={move_pitch:+d}"
-        )
-        sys.stdout.flush()
 
         self._clear_log_target()
-        if not self._move_both_signed_and_wait(
-            move_yaw, move_pitch, timeout_ms=300000
-        ):
+        if not self._move_to_step_target(
+                target_row, target_x_steps[target_row],
+                target_y_steps[target_row], plan_type):
             self._mark_position_unknown()
             if not self._scan_cancel_requested:
                 QMessageBox.critical(
-                    self, "Tarama Hatası", f"Segment {segment} tamamlanamadı."
+                    self, "Tarama Hatası", f"Row {target_row} tamamlanamadı."
                 )
             return
 
@@ -2085,6 +2131,8 @@ QGroupBox::title {
         try:
             pitch_d = list(self._planner_result.get("pitch_steps_delta", []))
             yaw_d = list(self._planner_result.get("yaw_steps_delta", []))
+            target_x_steps = list(self._planner_result.get("target_x_steps", []))
+            target_y_steps = list(self._planner_result.get("target_y_steps", []))
             dpy = list(self._planner_result.get("dpy", []))
             plan_type = str(self._planner_result.get("plan_type", "sequential"))
             scan_step = int(self._planner_result.get("scan_step", -1))
@@ -2096,6 +2144,9 @@ QGroupBox::title {
             total_seg = len(pitch_d)
             if len(dpy) != total_seg + 1:
                 raise RuntimeError("Planner hedef açı listesi uyumsuz.")
+            if (len(target_x_steps) != len(dpy)
+                    or len(target_y_steps) != len(dpy)):
+                raise RuntimeError("Kesin step hedef listesi uyumsuz.")
 
             if (self._current_point_kind != plan_type
                     or not isinstance(self._current_point_row, int)
@@ -2130,34 +2181,20 @@ QGroupBox::title {
                     self._clear_log_target()
                     return
 
-            cum_y = 0
-            cum_p = 0
             current_row = start_row
             while current_row != end_row:
                 target_row = current_row + scan_step
-                move_yaw, move_pitch, segment = planned_move_steps(
-                    pitch_d, yaw_d, current_row, target_row
-                )
 
                 self._clear_log_target()
-                print(
-                    f"[seg {segment:02d}] {current_row}→{target_row} "
-                    f"dYaw_steps={move_yaw:+d} dPitch_steps={move_pitch:+d}"
-                )
-                sys.stdout.flush()
-
-                if not self._move_both_signed_and_wait(
-                    move_yaw, move_pitch, timeout_ms=300000
-                ):
+                if not self._move_to_step_target(
+                        target_row, target_x_steps[target_row],
+                        target_y_steps[target_row], plan_type):
                     if self._scan_cancel_requested:
                         self._scan_sequence_active = False
                         self._clear_log_target()
                         return
-                    raise RuntimeError(f"Segment {segment} hareketi tamamlanamadı.")
+                    raise RuntimeError(f"Row {target_row} hareketi tamamlanamadı.")
 
-                cum_y += move_yaw
-                cum_p += move_pitch
-                print(f"            cumulative  yaw={cum_y:+d}  pitch={cum_p:+d}")
                 print("            [idle] iki motor da idle.")
                 sys.stdout.flush()
 
