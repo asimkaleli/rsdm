@@ -17,6 +17,7 @@ from PySide2.QtWidgets import (
     QWidget,
 )
 
+from laser_gpio import LaserGPIO
 from motor_control import MotorController, MotorPins, SharedPins
 
 
@@ -31,6 +32,9 @@ class YAxisStepTest(QWidget):
         self.setMinimumWidth(360)
         self._closing = False
         self._active_move_id = None
+        self.shared = None
+        self.motor = None
+        self.laser = None
 
         self.status_label = QLabel(
             "Hazır — Up: +100 step, Down: -100 step"
@@ -39,6 +43,11 @@ class YAxisStepTest(QWidget):
 
         self.position_label = QLabel("Yazılımsal Y konumu: 0 step")
         self.position_label.setAlignment(Qt.AlignCenter)
+        self.laser_label = QLabel("LAZER AÇIK — göz hizasına yöneltmeyin")
+        self.laser_label.setAlignment(Qt.AlignCenter)
+        self.laser_label.setStyleSheet(
+            "font-weight: bold; color: #b00020;"
+        )
 
         self.up_button = QPushButton("UP  (+100 step)")
         self.down_button = QPushButton("DOWN  (-100 step)")
@@ -50,24 +59,34 @@ class YAxisStepTest(QWidget):
         layout = QVBoxLayout(self)
         layout.addWidget(self.status_label)
         layout.addWidget(self.position_label)
+        layout.addWidget(self.laser_label)
         layout.addWidget(self.up_button)
         layout.addWidget(self.down_button)
         layout.addWidget(self.stop_button)
 
         # RSDM ana uygulamasındaki gerçek pin ve yön ayarları.
-        self.shared = SharedPins(
-            en=7, reset=8, sleep=25,
-            ms1=16, ms2=20, ms3=21,
-        )
-        self.motor = MotorController(
-            MotorPins(step=12, dir=5, dir_inverted=True),
-            shared=self.shared,
-        )
+        try:
+            self.shared = SharedPins(
+                en=7, reset=8, sleep=25,
+                ms1=16, ms2=20, ms3=21,
+            )
+            self.motor = MotorController(
+                MotorPins(step=12, dir=5, dir_inverted=True),
+                shared=self.shared,
+            )
 
-        # Ana uygulamayla aynı 1/16 microstep modu ve güvenli 100 step/s hız.
-        self.motor.set_microstep("SIXTEENTH")
-        self.motor.set_speed_ms(1000.0 / (2.0 * SPEED_SPS))
-        self.shared.set_enable(True)
+            # Ana uygulamayla aynı 1/16 microstep modu ve güvenli 100 step/s hız.
+            self.motor.set_microstep("SIXTEENTH")
+            self.motor.set_speed_ms(1000.0 / (2.0 * SPEED_SPS))
+            self.shared.set_enable(True)
+
+            # Lazer ancak motor kurulumu tamamlandıktan sonra açılır.
+            self.laser = LaserGPIO(line=24)
+            self.laser.set_enabled(False)
+            self.laser.set_enabled(True)
+        except Exception:
+            self._shutdown_hardware()
+            raise
 
         self.up_button.clicked.connect(lambda: self._move(+MOVE_STEPS, "UP"))
         self.down_button.clicked.connect(
@@ -130,36 +149,62 @@ class YAxisStepTest(QWidget):
 
     def _emergency_stop(self):
         self._set_move_buttons_enabled(False)
-        self.status_label.setText("Acil durdurma istendi...")
+        self.status_label.setText("Acil durdurma istendi; lazer kapatıldı...")
+        self._laser_off()
         self.motor.emergency_stop()
 
     def _on_motor_error(self, message: str):
         self._set_move_buttons_enabled(False)
         self.status_label.setText("Motor hatası")
+        self._laser_off()
         QMessageBox.critical(self, "Motor Hatası", str(message))
 
-    def closeEvent(self, event):
-        self._closing = True
-        self._set_move_buttons_enabled(False)
+    def _laser_off(self):
+        if self.laser is None:
+            return
         try:
-            self.motor.emergency_stop()
-            self.motor.shutdown()
-        finally:
+            self.laser.set_enabled(False)
+        except Exception:
+            pass
+        self.laser_label.setText("Lazer kapalı")
+
+    def _shutdown_hardware(self):
+        self._laser_off()
+        if self.motor is not None:
+            try:
+                self.motor.emergency_stop()
+                self.motor.shutdown()
+            except Exception:
+                pass
+        if self.shared is not None:
             try:
                 self.shared.set_enable(False)
             except Exception:
                 pass
+        if self.laser is not None:
+            try:
+                self.laser.release()
+            except Exception:
+                pass
+
+    def closeEvent(self, event):
+        self._closing = True
+        self._set_move_buttons_enabled(False)
+        self._shutdown_hardware()
         event.accept()
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="RSDM Y motorunu buton başına tam 100 step hareket ettirir."
+        description=(
+            "RSDM Y motorunu buton başına tam 100 step hareket ettirir ve "
+            "BCM 24 lazerini test boyunca açık tutar."
+        )
     )
     parser.add_argument(
         "--confirm-motion",
         action="store_true",
-        help="Mekanik alanın güvenli olduğunu bilinçli olarak onaylar.",
+        help="Mekanik alanın ve lazer yönünün güvenli olduğunu onaylar.",
     )
     return parser.parse_args()
 
@@ -169,7 +214,8 @@ def main() -> int:
     if not args.confirm_motion:
         print(
             "HAREKET ENGELLENDİ: Önce ana RSDM uygulamasını kapatın, "
-            "mekanik alanı güvenli hale getirin ve --confirm-motion ekleyin."
+            "mekanik alanı ve lazer yönünü güvenli hale getirin, ardından "
+            "--confirm-motion ekleyin."
         )
         return 2
 
@@ -177,7 +223,7 @@ def main() -> int:
     try:
         window = YAxisStepTest()
     except Exception as exc:
-        print(f"Motor başlatılamadı: {exc}")
+        print(f"Motor/lazer başlatılamadı: {exc}")
         return 1
     window.show()
     return app.exec_()
