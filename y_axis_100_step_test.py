@@ -14,6 +14,7 @@ from PySide2.QtWidgets import (
     QLabel,
     QMessageBox,
     QPushButton,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -35,6 +36,8 @@ class YAxisStepTest(QWidget):
         self._active_move_id = None
         self._active_axis = None
         self._manual_active_direction = None
+        self._approach_sequence = None
+        self._saved_targets = {"x": None, "y": None}
         self.shared = None
         self.motors = {}
         self.laser = None
@@ -60,6 +63,19 @@ class YAxisStepTest(QWidget):
         self.down_button = QPushButton("DOWN  (-100 step)")
         self.manual_button = QPushButton("MANUAL MODE: OFF")
         self.manual_button.setCheckable(True)
+        self.save_target_button = QPushButton("MEVCUT KONUMU HEDEF KAYDET")
+        self.approach_direction_combo = QComboBox()
+        self.approach_direction_combo.addItem("Son yaklaşma: DOWN (-)", -1)
+        self.approach_direction_combo.addItem("Son yaklaşma: UP (+)", 1)
+        self.overshoot_spin = QSpinBox()
+        # Sürücü 3200 pulse/devirdeyken 1.8 derece motor için bir tam
+        # motor adımı 16 pulse eder. Ayarı tam-adım fazlarında değiştirerek
+        # overshoot ile mikrostep fazı etkisini birbirine karıştırmayız.
+        self.overshoot_spin.setRange(16, 1024)
+        self.overshoot_spin.setSingleStep(16)
+        self.overshoot_spin.setValue(32)
+        self.overshoot_spin.setSuffix(" pulse overshoot")
+        self.approach_button = QPushButton("KAYITLI HEDEFE OVERSHOOT İLE GİT")
         self.stop_button = QPushButton("ACİL DURDUR")
         self.stop_button.setStyleSheet(
             "font-weight: bold; color: white; background-color: #b00020;"
@@ -73,6 +89,10 @@ class YAxisStepTest(QWidget):
         layout.addWidget(self.up_button)
         layout.addWidget(self.down_button)
         layout.addWidget(self.manual_button)
+        layout.addWidget(self.save_target_button)
+        layout.addWidget(self.approach_direction_combo)
+        layout.addWidget(self.overshoot_spin)
+        layout.addWidget(self.approach_button)
         layout.addWidget(self.stop_button)
 
         # RSDM ana uygulamasındaki gerçek pin ve yön ayarları.
@@ -118,6 +138,8 @@ class YAxisStepTest(QWidget):
         )
         self.manual_button.toggled.connect(self._manual_mode_changed)
         self.axis_combo.currentIndexChanged.connect(self._axis_changed)
+        self.save_target_button.clicked.connect(self._save_current_target)
+        self.approach_button.clicked.connect(self._start_approach_test)
         self.stop_button.clicked.connect(self._emergency_stop)
         for axis, motor in self.motors.items():
             motor.moveFinished.connect(
@@ -147,6 +169,14 @@ class YAxisStepTest(QWidget):
         self.down_button.setEnabled(enabled)
         self.manual_button.setEnabled(enabled)
         self.axis_combo.setEnabled(enabled)
+        self.save_target_button.setEnabled(enabled)
+        self.approach_direction_combo.setEnabled(enabled)
+        self.overshoot_spin.setEnabled(enabled)
+        axis = self.selected_axis if self.motors else None
+        self.approach_button.setEnabled(
+            enabled and axis is not None
+            and self._saved_targets.get(axis) is not None
+        )
 
     def _axis_changed(self, _index: int):
         axis = self.selected_axis.upper()
@@ -155,6 +185,121 @@ class YAxisStepTest(QWidget):
             f"Yazılımsal {axis} konumu: {position} step"
         )
         self.status_label.setText(f"{axis} ekseni seçildi")
+        self.approach_button.setEnabled(
+            self._saved_targets[self.selected_axis] is not None
+        )
+
+    def _save_current_target(self):
+        if self._closing or self.motor.is_busy():
+            return
+        axis = self.selected_axis
+        target = int(self.motor.position_steps())
+        self._saved_targets[axis] = target
+        self.approach_button.setEnabled(True)
+        self.status_label.setText(
+            f"{axis.upper()} hedefi kaydedildi: {target} step"
+        )
+        print(f"[approach-test-{axis}] saved_target={target}")
+        sys.stdout.flush()
+
+    def _start_approach_test(self):
+        if (self._closing or self.motor.is_busy()
+                or self._manual_active_direction is not None
+                or self._approach_sequence is not None):
+            return
+        axis = self.selected_axis
+        target = self._saved_targets.get(axis)
+        if target is None:
+            QMessageBox.warning(self, "Yaklaşma Testi", "Önce hedefi kaydedin.")
+            return
+        direction = int(self.approach_direction_combo.currentData())
+        overshoot = int(self.overshoot_spin.value())
+        pre_target = int(target) - direction * overshoot
+        current = int(self.motor.position_steps())
+        direction_text = "DOWN (-)" if direction < 0 else "UP (+)"
+        answer = QMessageBox.question(
+            self,
+            "Overshoot Onayı",
+            f"{axis.upper()} ekseni önce {pre_target} step konumuna gidecek, "
+            f"sonra hedef {target} step konumuna {direction_text} yönünde "
+            f"{overshoot} step yaklaşacak.\n\n"
+            "Bu iki konumun da mekanik sınırlar içinde olduğunu onaylıyor musunuz?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        self._approach_sequence = {
+            "axis": axis,
+            "target": int(target),
+            "pre_target": pre_target,
+            "direction": direction,
+            "overshoot": overshoot,
+            "phase": "to_pre_target",
+        }
+        self._active_axis = axis
+        self._set_move_buttons_enabled(False)
+        print(
+            f"[approach-test-{axis}] start current={current} target={target} "
+            f"pre_target={pre_target} final_direction={direction:+d} "
+            f"overshoot={overshoot}"
+        )
+        sys.stdout.flush()
+        self._submit_approach_delta(pre_target - current)
+
+    def _submit_approach_delta(self, delta: int):
+        sequence = self._approach_sequence
+        if sequence is None:
+            return
+        axis = sequence["axis"]
+        if delta == 0:
+            self._advance_approach_sequence(axis, True)
+            return
+        move_id = self.motors[axis].move_signed_steps(int(delta))
+        if move_id == 0:
+            self._finish_approach_sequence(False, "Hareket oluşturulamadı")
+            return
+        self._active_move_id = int(move_id)
+        self.status_label.setText(
+            f"Yaklaşma testi: {sequence['phase']} ({delta:+d} step)"
+        )
+
+    def _advance_approach_sequence(self, axis: str, completed: bool):
+        sequence = self._approach_sequence
+        if sequence is None or axis != sequence["axis"]:
+            return
+        if not completed:
+            self._finish_approach_sequence(False, "Hareket iptal edildi")
+            return
+        if sequence["phase"] == "to_pre_target":
+            sequence["phase"] = "final_approach"
+            final_delta = sequence["direction"] * sequence["overshoot"]
+            self._submit_approach_delta(final_delta)
+            return
+        reached = int(self.motors[axis].position_steps())
+        ok = reached == sequence["target"]
+        self._finish_approach_sequence(
+            ok,
+            f"hedef={sequence['target']} ulaşılan={reached}",
+        )
+
+    def _finish_approach_sequence(self, success: bool, detail: str):
+        sequence = self._approach_sequence
+        if sequence is not None:
+            print(
+                f"[approach-test-{sequence['axis']}] finish "
+                f"success={success} {detail}"
+            )
+            sys.stdout.flush()
+        self._approach_sequence = None
+        self._active_move_id = None
+        self._active_axis = None
+        self.status_label.setText(
+            ("Yaklaşma tamamlandı — " if success else "Yaklaşma başarısız — ")
+            + detail
+        )
+        if not self._closing:
+            self._set_move_buttons_enabled(True)
 
     def _manual_mode_changed(self, checked: bool):
         if checked:
@@ -241,6 +386,10 @@ class YAxisStepTest(QWidget):
         if (self._active_move_id is not None
                 and int(move_id) != self._active_move_id):
             return
+        if self._approach_sequence is not None:
+            self._active_move_id = None
+            self._advance_approach_sequence(axis, bool(completed))
+            return
         position = self.motors[axis].position_steps()
         self._active_move_id = None
         self._active_axis = None
@@ -264,6 +413,8 @@ class YAxisStepTest(QWidget):
             self._set_move_buttons_enabled(True)
 
     def _on_busy_changed(self, axis: str, busy: bool):
+        if self._approach_sequence is not None:
+            return
         if self._active_axis is not None and axis != self._active_axis:
             return
         if busy or self._closing or self._manual_active_direction is not None:
@@ -283,6 +434,9 @@ class YAxisStepTest(QWidget):
 
     def _emergency_stop(self):
         self._manual_active_direction = None
+        self._approach_sequence = None
+        self._active_move_id = None
+        self._active_axis = None
         self._set_move_buttons_enabled(False)
         self.status_label.setText("Acil durdurma istendi; lazer kapatıldı...")
         self._laser_off()
