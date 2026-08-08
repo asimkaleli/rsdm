@@ -32,6 +32,7 @@ class YAxisStepTest(QWidget):
         self.setMinimumWidth(360)
         self._closing = False
         self._active_move_id = None
+        self._manual_active_direction = None
         self.shared = None
         self.motor = None
         self.laser = None
@@ -51,6 +52,8 @@ class YAxisStepTest(QWidget):
 
         self.up_button = QPushButton("UP  (+100 step)")
         self.down_button = QPushButton("DOWN  (-100 step)")
+        self.manual_button = QPushButton("MANUAL MODE: OFF")
+        self.manual_button.setCheckable(True)
         self.stop_button = QPushButton("ACİL DURDUR")
         self.stop_button.setStyleSheet(
             "font-weight: bold; color: white; background-color: #b00020;"
@@ -62,6 +65,7 @@ class YAxisStepTest(QWidget):
         layout.addWidget(self.laser_label)
         layout.addWidget(self.up_button)
         layout.addWidget(self.down_button)
+        layout.addWidget(self.manual_button)
         layout.addWidget(self.stop_button)
 
         # RSDM ana uygulamasındaki gerçek pin ve yön ayarları.
@@ -88,18 +92,78 @@ class YAxisStepTest(QWidget):
             self._shutdown_hardware()
             raise
 
-        self.up_button.clicked.connect(lambda: self._move(+MOVE_STEPS, "UP"))
-        self.down_button.clicked.connect(
-            lambda: self._move(-MOVE_STEPS, "DOWN")
+        self.up_button.pressed.connect(
+            lambda: self._direction_pressed(+1, "UP")
         )
+        self.up_button.released.connect(
+            lambda: self._direction_released(+1, "UP")
+        )
+        self.down_button.pressed.connect(
+            lambda: self._direction_pressed(-1, "DOWN")
+        )
+        self.down_button.released.connect(
+            lambda: self._direction_released(-1, "DOWN")
+        )
+        self.manual_button.toggled.connect(self._manual_mode_changed)
         self.stop_button.clicked.connect(self._emergency_stop)
         self.motor.moveFinished.connect(self._on_move_finished)
+        self.motor.busyChanged.connect(self._on_busy_changed)
         self.motor.error.connect(self._on_motor_error)
         self.motor.set_step_callback(self._on_step_update)
 
     def _set_move_buttons_enabled(self, enabled: bool):
         self.up_button.setEnabled(enabled)
         self.down_button.setEnabled(enabled)
+        self.manual_button.setEnabled(enabled)
+
+    def _manual_mode_changed(self, checked: bool):
+        if checked:
+            self.manual_button.setText("MANUAL MODE: ON")
+            self.up_button.setText("UP  (basılı tut)")
+            self.down_button.setText("DOWN  (basılı tut)")
+            self.status_label.setText(
+                "Manuel mod — hareket için yön butonunu basılı tutun"
+            )
+        else:
+            self.manual_button.setText("MANUAL MODE: OFF")
+            self.up_button.setText("UP  (+100 step)")
+            self.down_button.setText("DOWN  (-100 step)")
+            self.status_label.setText(
+                "100-step modu — Up: +100 step, Down: -100 step"
+            )
+
+    def _direction_pressed(self, direction: int, direction_name: str):
+        if self.manual_button.isChecked():
+            self._start_manual(direction, direction_name)
+        else:
+            self._move(direction * MOVE_STEPS, direction_name)
+
+    def _direction_released(self, direction: int, direction_name: str):
+        if self._manual_active_direction != direction:
+            return
+        self._manual_active_direction = None
+        self.status_label.setText(f"{direction_name}: manuel hareket durduruluyor...")
+        self.motor.stop_continuous()
+
+    def _start_manual(self, direction: int, direction_name: str):
+        if (self._closing or self.motor.is_busy()
+                or self._manual_active_direction is not None):
+            return
+        self._manual_active_direction = int(direction)
+        self.manual_button.setEnabled(False)
+        if direction > 0:
+            self.down_button.setEnabled(False)
+        else:
+            self.up_button.setEnabled(False)
+        self.status_label.setText(
+            f"{direction_name}: manuel hareket — bırakınca durur"
+        )
+        print(
+            f"[manual-test] start direction={direction:+d} "
+            f"from={self.motor.position_steps()}"
+        )
+        sys.stdout.flush()
+        self.motor.start_continuous(direction)
 
     def _move(self, signed_steps: int, direction_name: str):
         if self._closing or self.motor.is_busy():
@@ -147,7 +211,21 @@ class YAxisStepTest(QWidget):
         if not self._closing:
             self._set_move_buttons_enabled(True)
 
+    def _on_busy_changed(self, busy: bool):
+        if busy or self._closing or self._manual_active_direction is not None:
+            return
+        position = self.motor.position_steps()
+        self.position_label.setText(f"Yazılımsal Y konumu: {position} step")
+        if self.manual_button.isChecked():
+            self.status_label.setText(
+                f"Manuel hareket durdu — konum: {position} step"
+            )
+            print(f"[manual-test] stop position={position}")
+            sys.stdout.flush()
+        self._set_move_buttons_enabled(True)
+
     def _emergency_stop(self):
+        self._manual_active_direction = None
         self._set_move_buttons_enabled(False)
         self.status_label.setText("Acil durdurma istendi; lazer kapatıldı...")
         self._laser_off()
