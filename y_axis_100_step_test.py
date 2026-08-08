@@ -1,0 +1,187 @@
+"""Y eksenini sabit 100 pulse ile güvenli biçimde ileri/geri test eder.
+
+Bu araç gerçek donanımı hareket ettirir. Ana RSDM uygulamasını kapatın,
+mekanik alanı boşaltın ve yalnız hedef Raspberry Pi üzerinde çalıştırın.
+"""
+
+import argparse
+import sys
+
+from PySide2.QtCore import Qt
+from PySide2.QtWidgets import (
+    QApplication,
+    QLabel,
+    QMessageBox,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
+
+from motor_control import MotorController, MotorPins, SharedPins
+
+
+MOVE_STEPS = 100
+SPEED_SPS = 100.0
+
+
+class YAxisStepTest(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("RSDM Y Axis - 100 Step Test")
+        self.setMinimumWidth(360)
+        self._closing = False
+        self._active_move_id = None
+
+        self.status_label = QLabel(
+            "Hazır — Up: +100 step, Down: -100 step"
+        )
+        self.status_label.setAlignment(Qt.AlignCenter)
+
+        self.position_label = QLabel("Yazılımsal Y konumu: 0 step")
+        self.position_label.setAlignment(Qt.AlignCenter)
+
+        self.up_button = QPushButton("UP  (+100 step)")
+        self.down_button = QPushButton("DOWN  (-100 step)")
+        self.stop_button = QPushButton("ACİL DURDUR")
+        self.stop_button.setStyleSheet(
+            "font-weight: bold; color: white; background-color: #b00020;"
+        )
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.status_label)
+        layout.addWidget(self.position_label)
+        layout.addWidget(self.up_button)
+        layout.addWidget(self.down_button)
+        layout.addWidget(self.stop_button)
+
+        # RSDM ana uygulamasındaki gerçek pin ve yön ayarları.
+        self.shared = SharedPins(
+            en=7, reset=8, sleep=25,
+            ms1=16, ms2=20, ms3=21,
+        )
+        self.motor = MotorController(
+            MotorPins(step=12, dir=5, dir_inverted=True),
+            shared=self.shared,
+        )
+
+        # Ana uygulamayla aynı 1/16 microstep modu ve güvenli 100 step/s hız.
+        self.motor.set_microstep("SIXTEENTH")
+        self.motor.set_speed_ms(1000.0 / (2.0 * SPEED_SPS))
+        self.shared.set_enable(True)
+
+        self.up_button.clicked.connect(lambda: self._move(+MOVE_STEPS, "UP"))
+        self.down_button.clicked.connect(
+            lambda: self._move(-MOVE_STEPS, "DOWN")
+        )
+        self.stop_button.clicked.connect(self._emergency_stop)
+        self.motor.moveFinished.connect(self._on_move_finished)
+        self.motor.error.connect(self._on_motor_error)
+        self.motor.set_step_callback(self._on_step_update)
+
+    def _set_move_buttons_enabled(self, enabled: bool):
+        self.up_button.setEnabled(enabled)
+        self.down_button.setEnabled(enabled)
+
+    def _move(self, signed_steps: int, direction_name: str):
+        if self._closing or self.motor.is_busy():
+            return
+        self._set_move_buttons_enabled(False)
+        self.status_label.setText(
+            f"{direction_name}: {signed_steps:+d} step hareket ediyor..."
+        )
+        move_id = self.motor.move_signed_steps(signed_steps)
+        if move_id == 0:
+            self.status_label.setText("Hareket oluşturulamadı.")
+            self._set_move_buttons_enabled(True)
+            return
+        self._active_move_id = int(move_id)
+        print(
+            f"[100-step-test] start id={move_id} command={signed_steps:+d} "
+            f"from={self.motor.position_steps()}"
+        )
+        sys.stdout.flush()
+
+    def _on_step_update(self, _delta: int):
+        self.position_label.setText(
+            f"Yazılımsal Y konumu: {self.motor.position_steps()} step"
+        )
+
+    def _on_move_finished(self, move_id: int, completed: bool):
+        if self._active_move_id is not None and int(move_id) != self._active_move_id:
+            return
+        position = self.motor.position_steps()
+        self._active_move_id = None
+        self.position_label.setText(f"Yazılımsal Y konumu: {position} step")
+        if completed:
+            self.status_label.setText(
+                f"Tamamlandı — konum: {position} step"
+            )
+        else:
+            self.status_label.setText(
+                f"Hareket iptal edildi — konum: {position} step"
+            )
+        print(
+            f"[100-step-test] finish id={move_id} "
+            f"completed={bool(completed)} position={position}"
+        )
+        sys.stdout.flush()
+        if not self._closing:
+            self._set_move_buttons_enabled(True)
+
+    def _emergency_stop(self):
+        self._set_move_buttons_enabled(False)
+        self.status_label.setText("Acil durdurma istendi...")
+        self.motor.emergency_stop()
+
+    def _on_motor_error(self, message: str):
+        self._set_move_buttons_enabled(False)
+        self.status_label.setText("Motor hatası")
+        QMessageBox.critical(self, "Motor Hatası", str(message))
+
+    def closeEvent(self, event):
+        self._closing = True
+        self._set_move_buttons_enabled(False)
+        try:
+            self.motor.emergency_stop()
+            self.motor.shutdown()
+        finally:
+            try:
+                self.shared.set_enable(False)
+            except Exception:
+                pass
+        event.accept()
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="RSDM Y motorunu buton başına tam 100 step hareket ettirir."
+    )
+    parser.add_argument(
+        "--confirm-motion",
+        action="store_true",
+        help="Mekanik alanın güvenli olduğunu bilinçli olarak onaylar.",
+    )
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    if not args.confirm_motion:
+        print(
+            "HAREKET ENGELLENDİ: Önce ana RSDM uygulamasını kapatın, "
+            "mekanik alanı güvenli hale getirin ve --confirm-motion ekleyin."
+        )
+        return 2
+
+    app = QApplication(sys.argv[:1])
+    try:
+        window = YAxisStepTest()
+    except Exception as exc:
+        print(f"Motor başlatılamadı: {exc}")
+        return 1
+    window.show()
+    return app.exec_()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
