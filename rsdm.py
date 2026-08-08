@@ -197,6 +197,7 @@ QGroupBox::title {
         self._y_up_pressed = False
         self._y_down_pressed = False
         self._manual_continuous_axis = {"x": None, "y": None}
+        self._last_manual_approach = {"x": None, "y": None}
 
         # Sequential endpoint positions are read directly from the motor
         # workers, independently of queued Qt step-update signals.
@@ -785,6 +786,7 @@ QGroupBox::title {
 
         self._mark_position_unknown()
         self._manual_continuous_axis[axis] = direction
+        self._last_manual_approach[axis] = direction
         self._axis_motor(axis).start_continuous(
             self._manual_direction_sign(axis, direction)
         )
@@ -1091,17 +1093,78 @@ QGroupBox::title {
         self._steps_y_abs = int(self.motorY.position_steps())
 
     def _position_capture_ready(self, title: str) -> bool:
-        if self.motorX.is_busy() or self.motorY.is_busy():
+        """Capture only after manual stop is processed and counters are stable."""
+        active = [
+            axis for axis, direction in self._manual_continuous_axis.items()
+            if direction is not None
+        ]
+        if active:
             QMessageBox.warning(
                 self, title,
-                "Motor hareketi henüz tamamlanmadı. Noktayı kaydetmeden önce bekleyin.",
+                "Ok tuşunu/butonunu tamamen bırakmadan nokta kaydedilemez.",
             )
             return False
-        QApplication.processEvents()
-        if self.motorX.is_busy() or self.motorY.is_busy():
+
+        # A key/button release queues continuous_stop in the motor worker.
+        # Do not take a snapshot until that queued stop has actually completed.
+        idle_deadline = time.monotonic() + 3.0
+        while time.monotonic() < idle_deadline:
+            QApplication.processEvents()
+            if any(direction is not None
+                   for direction in self._manual_continuous_axis.values()):
+                return False
+            if not self.motorX.is_busy() and not self.motorY.is_busy():
+                break
+            time.sleep(0.005)
+        else:
+            QMessageBox.warning(
+                self, title,
+                "Motor durdurma komutu 3 saniye içinde tamamlanmadı; nokta kaydedilmedi.",
+            )
             return False
-        self._sync_absolute_steps()
-        return True
+
+        # Require an unchanged authoritative worker position for 150 ms. This
+        # closes the release/store race without guessing from delayed Qt step
+        # signals. Any new manual input aborts the capture immediately.
+        stable_for_s = 0.150
+        stable_since = time.monotonic()
+        snapshot = (
+            int(self.motorX.position_steps()),
+            int(self.motorY.position_steps()),
+        )
+        stable_deadline = time.monotonic() + 2.0
+        while time.monotonic() < stable_deadline:
+            QApplication.processEvents()
+            if any(direction is not None
+                   for direction in self._manual_continuous_axis.values()):
+                return False
+            if self.motorX.is_busy() or self.motorY.is_busy():
+                stable_since = time.monotonic()
+            current = (
+                int(self.motorX.position_steps()),
+                int(self.motorY.position_steps()),
+            )
+            if current != snapshot:
+                snapshot = current
+                stable_since = time.monotonic()
+            elif (not self.motorX.is_busy() and not self.motorY.is_busy()
+                  and time.monotonic() - stable_since >= stable_for_s):
+                self._steps_x_abs, self._steps_y_abs = snapshot
+                print(
+                    f"[position-capture] title={title!r} stable_ms=150 "
+                    f"absolute={snapshot} approach="
+                    f"({self._last_manual_approach['x']},"
+                    f"{self._last_manual_approach['y']})"
+                )
+                sys.stdout.flush()
+                return True
+            time.sleep(0.005)
+
+        QMessageBox.warning(
+            self, title,
+            "Motor step sayaçları kararlı hale gelmedi; nokta kaydedilmedi.",
+        )
+        return False
 
     def _reset_step_counters(self):
         self._sx_right = 0
