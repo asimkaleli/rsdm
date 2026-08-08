@@ -75,7 +75,7 @@ class YAxisStepTest(QWidget):
                 ms1=16, ms2=20, ms3=21,
             )
             self.motor = MotorController(
-                MotorPins(step=12, dir=5, dir_inverted=True),
+                MotorPins(step=13, dir=6, dir_inverted=True),
                 shared=self.shared,
             )
 
