@@ -128,6 +128,34 @@ def anchored_step_targets(
     return x_targets, y_targets
 
 
+def recorded_approach_sources(
+    x_targets, y_targets, first_source_x: int, first_source_y: int,
+    overrides=None,
+) -> Tuple[List[int], List[int]]:
+    """Build the source waypoint used for each point's final approach.
+
+    The first point uses the position captured before it was selected. Every
+    later generated point normally uses the preceding path target, so replay
+    proceeds in the same forward direction. Explicitly selected points (for
+    example Area Scan corners) may replace their source through ``overrides``.
+    """
+    x_targets = [int(value) for value in x_targets]
+    y_targets = [int(value) for value in y_targets]
+    if not x_targets or len(x_targets) != len(y_targets):
+        raise ValueError("Target coordinate lengths do not match.")
+
+    from_x = [int(first_source_x)] + x_targets[:-1]
+    from_y = [int(first_source_y)] + y_targets[:-1]
+    for row, source in dict(overrides or {}).items():
+        row = int(row)
+        if not 0 <= row < len(x_targets):
+            raise IndexError("Approach override row is outside the path.")
+        source_x, source_y = source
+        from_x[row] = int(source_x)
+        from_y[row] = int(source_y)
+    return from_x, from_y
+
+
 def _dpy_to_step_deltas(dpy_list, stepper_pitch, stepper_yaw):
     """Quantize absolute targets first so rounding cannot accumulate."""
     if len(dpy_list) < 2:
@@ -226,7 +254,9 @@ def plan_laser_path(
 
     return {
         "plan_type": "sequential",
-        "scan_step": -1,
+        # Replay always starts at the first selected point and follows the
+        # same forward direction used to create the path.
+        "scan_step": 1,
         "xyz": xyz_list,               # (N+1) nokta
         "dpy": dpy_list,               # (N+1) nokta
         "pitch_steps_delta": pitch_steps_delta,  # N adet

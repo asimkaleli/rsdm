@@ -37,7 +37,8 @@ from motor_control import MotorController, MotorPins, SharedPins
 
 # Yalnızca planlayıcıyı kullanacağız (fallback yok)
 from laser_path_planner import (
-    anchored_step_targets, plan_grid_path, plan_laser_path, StepperConfig,
+    anchored_step_targets, plan_grid_path, plan_laser_path,
+    recorded_approach_sources, StepperConfig,
 )
 
 from datetime import datetime
@@ -45,6 +46,8 @@ from datetime import datetime
 T = TypeVar("T")
 TARGET_X_STEPS_ROLE = Qt.UserRole + 1
 TARGET_Y_STEPS_ROLE = Qt.UserRole + 2
+APPROACH_FROM_X_STEPS_ROLE = Qt.UserRole + 3
+APPROACH_FROM_Y_STEPS_ROLE = Qt.UserRole + 4
 
 class rsdm(QWidget):
     # ----------- KALİBRASYON (kendine göre güncelle) -----------
@@ -198,11 +201,23 @@ QGroupBox::title {
         self._y_down_pressed = False
         self._manual_continuous_axis = {"x": None, "y": None}
         self._last_manual_approach = {"x": None, "y": None}
+        # Her eksende son manuel yaklaşmanın başladığı kesin pulse konumu.
+        # Nokta kaydında hedefle birlikte saklanır ve geri dönüşte aynı son
+        # yaklaşma yönünü yeniden üretmek için kullanılır.
+        self._manual_approach_from_steps = {
+            "x": int(self.motorX.position_steps())
+            if hasattr(self, "motorX") else 0,
+            "y": int(self.motorY.position_steps())
+            if hasattr(self, "motorY") else 0,
+        }
+        self._pending_area_approach = {}
 
         # Sequential endpoint positions are read directly from the motor
         # workers, independently of queued Qt step-update signals.
         self._seq_first_steps = None
         self._seq_last_steps = None
+        self._seq_first_approach_steps = None
+        self._seq_last_approach_steps = None
 
         # --- Plan çıktısı ---
         self._planner_result = None  # dict: xyz, dpy, pitch_steps_delta, yaw_steps_delta
@@ -412,6 +427,9 @@ QGroupBox::title {
             self._last_distance_at_select = None
             self._seq_first_steps = None
             self._seq_last_steps = None
+            self._seq_first_approach_steps = None
+            self._seq_last_approach_steps = None
+            self._pending_area_approach.clear()
             self._track_steps = False
             self._awaiting_marker_click = False
             self._last_store_row = None
@@ -784,6 +802,12 @@ QGroupBox::title {
         if active_direction is not None and active_direction != direction:
             self._axis_motor(axis).stop_continuous()
 
+        # Bu basış, ilgili eksendeki son yaklaşma parçasının başlangıcıdır.
+        # Yalnız hareket eden ekseni güncelleriz; diğer eksenin son kayıtlı
+        # yaklaşma başlangıcı korunur.
+        self._manual_approach_from_steps[axis] = int(
+            self._axis_motor(axis).position_steps()
+        )
         self._mark_position_unknown()
         self._manual_continuous_axis[axis] = direction
         self._last_manual_approach[axis] = direction
@@ -795,6 +819,22 @@ QGroupBox::title {
         if self._manual_continuous_axis.get(axis) == direction:
             self._axis_motor(axis).stop_continuous()
             self._manual_continuous_axis[axis] = None
+
+    def _manual_approach_waypoint(self):
+        """Return the per-axis start of the final manual approach."""
+        return (
+            int(self._manual_approach_from_steps["x"]),
+            int(self._manual_approach_from_steps["y"]),
+        )
+
+    def _reset_manual_approach_tracking(self):
+        """Make the current position the neutral source for the next capture."""
+        self._sync_absolute_steps()
+        self._manual_approach_from_steps = {
+            "x": int(self._steps_x_abs),
+            "y": int(self._steps_y_abs),
+        }
+        self._last_manual_approach = {"x": None, "y": None}
 
     # ---------- Hız / speed combo ----------
     def init_speed_combo(self):
@@ -998,11 +1038,19 @@ QGroupBox::title {
         return rows
 
     @staticmethod
-    def _set_step_target_data(pitch_item, yaw_item, x_steps: int, y_steps: int):
-        """Attach exact worker pulse coordinates to a visible table row."""
+    def _set_step_target_data(pitch_item, yaw_item, x_steps: int, y_steps: int,
+                              approach_from_x=None, approach_from_y=None):
+        """Attach exact target and recorded approach coordinates to a row."""
         for item in (pitch_item, yaw_item):
             item.setData(TARGET_X_STEPS_ROLE, int(x_steps))
             item.setData(TARGET_Y_STEPS_ROLE, int(y_steps))
+            if approach_from_x is not None and approach_from_y is not None:
+                item.setData(
+                    APPROACH_FROM_X_STEPS_ROLE, int(approach_from_x)
+                )
+                item.setData(
+                    APPROACH_FROM_Y_STEPS_ROLE, int(approach_from_y)
+                )
 
     def _row_step_target(self, row: int):
         item = self.ui.table.item(row, 0)
@@ -1014,12 +1062,19 @@ QGroupBox::title {
             return None
         return int(x_steps), int(y_steps)
 
-    def _move_to_step_target(self, row: int, target_x: int, target_y: int,
-                             target_kind: str) -> bool:
-        """Move from live worker counters to one exact absolute target."""
-        if self.motorX.is_busy() or self.motorY.is_busy():
-            QMessageBox.warning(self, "Motor Meşgul", "Motor hareketi devam ediyor.")
-            return False
+    def _row_approach_from(self, row: int):
+        item = self.ui.table.item(row, 0)
+        if item is None:
+            return None
+        from_x = item.data(APPROACH_FROM_X_STEPS_ROLE)
+        from_y = item.data(APPROACH_FROM_Y_STEPS_ROLE)
+        if from_x is None or from_y is None:
+            return None
+        return int(from_x), int(from_y)
+
+    def _move_to_absolute_target(self, row: int, target_x: int, target_y: int,
+                                 target_kind: str) -> bool:
+        """Move directly to one absolute pulse target."""
         self._sync_absolute_steps()
         current_x, current_y = self._steps_x_abs, self._steps_y_abs
         target_x, target_y = int(target_x), int(target_y)
@@ -1047,6 +1102,33 @@ QGroupBox::title {
             self._mark_position_unknown()
         return reached
 
+    def _move_to_step_target(self, row: int, target_x: int, target_y: int,
+                             target_kind: str, approach_from=None) -> bool:
+        """Reach a target through its recorded final-approach waypoint."""
+        if self.motorX.is_busy() or self.motorY.is_busy():
+            QMessageBox.warning(self, "Motor Meşgul", "Motor hareketi devam ediyor.")
+            return False
+        target_x, target_y = int(target_x), int(target_y)
+        if approach_from is not None:
+            from_x, from_y = map(int, approach_from)
+            print(
+                f"[recorded-approach-{target_kind}] row={row} "
+                f"from=({from_x},{from_y}) target=({target_x},{target_y}) "
+                f"final_delta=({target_x-from_x:+d},{target_y-from_y:+d})"
+            )
+            sys.stdout.flush()
+            if ((from_x, from_y) != (target_x, target_y)
+                    and not self._move_to_absolute_target(
+                        row, from_x, from_y, f"{target_kind}-approach-from")):
+                return False
+
+        reached = self._move_to_absolute_target(
+            row, target_x, target_y, target_kind
+        )
+        if reached:
+            self._reset_manual_approach_tracking()
+        return reached
+
     def _goto_angle_row(self, row: int, wait_s: float = 0.0) -> bool:
         """
         Verilen açı satırına (Pitch,Yaw) gidecek şekilde motorları hareket ettirir.
@@ -1069,7 +1151,10 @@ QGroupBox::title {
         # --- HAREKETTEN ÖNCE: log satırını temizle ---
         self._clear_log_target()
 
-        if not self._move_to_step_target(row, target[0], target[1], "stored"):
+        approach_from = self._row_approach_from(row)
+        if not self._move_to_step_target(
+                row, target[0], target[1], "stored",
+                approach_from=approach_from):
             QMessageBox.critical(self, "Tarama Hatası",
                                  f"Row {row} konumuna hareket tamamlanamadı.")
             return False
@@ -1194,6 +1279,8 @@ QGroupBox::title {
         # O anki D'yi yakala
         self._first_distance = measurement[0]
         self._seq_first_steps = (self._steps_x_abs, self._steps_y_abs)
+        self._seq_first_approach_steps = self._manual_approach_waypoint()
+        self._reset_manual_approach_tracking()
 
     def on_select_last_clicked(self):
         if self._scan_sequence_active:
@@ -1213,6 +1300,8 @@ QGroupBox::title {
         # O anki D'yi yakala
         self._last_distance_at_select = measurement[0]
         self._seq_last_steps = (self._steps_x_abs, self._steps_y_abs)
+        self._seq_last_approach_steps = self._manual_approach_waypoint()
+        self._reset_manual_approach_tracking()
 
     def _update_sequential_total(self, *_):
         total = int(self.ui.countSpin.value()) + 1
@@ -1239,6 +1328,7 @@ QGroupBox::title {
 
     def _reset_area_selection(self):
         self._area_corners.clear()
+        self._pending_area_approach.clear()
         self.label.area_points.clear()
         labels = {
             "A": "A - Top Left",
@@ -1268,6 +1358,8 @@ QGroupBox::title {
             return
         if corner == "A":
             self._reset_area_selection()
+        self._pending_area_approach[corner] = self._manual_approach_waypoint()
+        self._reset_manual_approach_tracking()
         self._track_steps = False
         self.label.first_point = None
         self.label.last_point = None
@@ -1307,6 +1399,9 @@ QGroupBox::title {
             "steps_y": int(self._steps_y_abs),
             "distance": measurement[0],
             "unit": measurement[1],
+            "approach_from": self._pending_area_approach.pop(
+                corner, (int(self._steps_x_abs), int(self._steps_y_abs))
+            ),
         }
         self._area_button(corner).setText(f"{corner} Selected")
         self._planner_result = None
@@ -1370,16 +1465,10 @@ QGroupBox::title {
             QMessageBox.warning(self, "Area Scan", "Köşe mesafelerinin birimleri aynı değil.")
             return
 
-        # Normal seçim A→B→C→D şeklindedir ve tarama D'den başlar.
-        # D seçildikten sonra manuel hareket olduysa fiziksel başlangıç bilinmez.
+        # Normal seçim A→B→C→D şeklindedir ve tarama D'den başlar. D'ye
+        # sonradan dönmek güvenlidir; kaydedilen yaklaşma başlangıcı da planda
+        # tutulduğu için oluşturma anında motorun D üzerinde olması gerekmez.
         d_corner = self._area_corners["D"]
-        if (int(self._steps_x_abs) != d_corner["steps_x"]
-                or int(self._steps_y_abs) != d_corner["steps_y"]):
-            QMessageBox.warning(
-                self, "Area Scan",
-                "Tarama D köşesinden başlar. Motoru D noktasına getirip D köşesini yeniden seçin.",
-            )
-            return
 
         deg_per_step_x = (float(self.STEP_ANGLE_DEG_X)
                           / float(self.MICROSTEP_DIV_X)
@@ -1429,14 +1518,34 @@ QGroupBox::title {
         )
         result["target_x_steps"] = target_x_steps
         result["target_y_steps"] = target_y_steps
+        x_segments = int(self.ui.areaXDiv.value())
+        y_segments = int(self.ui.areaYDiv.value())
+
+        corner_indices = {
+            (0, 0): "D",
+            (x_segments, 0): "C",
+            (0, y_segments): "A",
+            (x_segments, y_segments): "B",
+        }
+        approach_overrides = {}
+        for row, grid_index in enumerate(grid_indices):
+            corner = corner_indices.get(tuple(grid_index))
+            if corner is not None:
+                approach_overrides[row] = self._area_corners[corner][
+                    "approach_from"
+                ]
+        approach_x_steps, approach_y_steps = recorded_approach_sources(
+            target_x_steps, target_y_steps,
+            d_corner["approach_from"][0], d_corner["approach_from"][1],
+            overrides=approach_overrides,
+        )
+        result["approach_from_x_steps"] = approach_x_steps
+        result["approach_from_y_steps"] = approach_y_steps
 
         self.table.setRowCount(0)
         self.label.markers.clear()
         pixels = {name: self._area_corners[name]["pixel"]
                   for name in ("A", "B", "C", "D")}
-        x_segments = int(self.ui.areaXDiv.value())
-        y_segments = int(self.ui.areaYDiv.value())
-
         for row, ((_, pitch, yaw), (ix, iy)) in enumerate(zip(dpy, grid_indices)):
             pitch_item = QTableWidgetItem(f"{pitch:.4f}")
             yaw_item = QTableWidgetItem(f"{yaw:.4f}")
@@ -1445,6 +1554,7 @@ QGroupBox::title {
             self._set_step_target_data(
                 pitch_item, yaw_item,
                 target_x_steps[row], target_y_steps[row],
+                approach_x_steps[row], approach_y_steps[row],
             )
             self.table.insertRow(row)
             self.table.setItem(row, 0, pitch_item)
@@ -1473,9 +1583,7 @@ QGroupBox::title {
         self.label.last_point = None
         self.label.update()
         self._planner_result = result
-        self._set_current_point("grid", 0)
-        _, pitch, yaw = dpy[0]
-        self._set_log_target(0, pitch, yaw)
+        self._mark_position_unknown()
         QMessageBox.information(
             self, "Area Scan",
             f"{len(dpy)} alan noktası oluşturuldu. Tarama D köşesinden başlayacak.",
@@ -1559,6 +1667,7 @@ QGroupBox::title {
         # Mevcut mutlak step değerleri
         sx = self._steps_x_abs   # MotorX → Yaw
         sy = self._steps_y_abs   # MotorY → Pitch
+        approach_from = self._manual_approach_waypoint()
 
         angle_rows = self._get_angle_rows()
         if not angle_rows and table.rowCount() > 0:
@@ -1617,15 +1726,21 @@ QGroupBox::title {
         # Bu satırın "açı satırı" olduğunu işaretle
         pitch_item.setData(Qt.UserRole, "stored_angle")
         yaw_item.setData(Qt.UserRole, "stored_angle")
-        self._set_step_target_data(pitch_item, yaw_item, sx, sy)
+        self._set_step_target_data(
+            pitch_item, yaw_item, sx, sy,
+            approach_from[0], approach_from[1],
+        )
 
         table.setItem(row, 0, pitch_item)
         table.setItem(row, 1, yaw_item)
         print(
             f"[store-point] row={row} absolute=({sx},{sy}) "
-            f"relative=({sx - self._origin_steps_x},{sy - self._origin_steps_y})"
+            f"relative=({sx - self._origin_steps_x},{sy - self._origin_steps_y}) "
+            f"approach_from=({approach_from[0]},{approach_from[1]}) "
+            f"approach_delta=({sx-approach_from[0]:+d},{sy-approach_from[1]:+d})"
         )
         sys.stdout.flush()
+        self._reset_manual_approach_tracking()
 
         # Silme butonu ekle (3. sütun)
         btn = self._make_delete_btn(framed=True)
@@ -1975,6 +2090,18 @@ QGroupBox::title {
         )
         result["target_x_steps"] = target_x_steps
         result["target_y_steps"] = target_y_steps
+        first_approach = (
+            self._seq_first_approach_steps
+            if self._seq_first_approach_steps is not None
+            else self._seq_first_steps
+        )
+        approach_x_steps, approach_y_steps = recorded_approach_sources(
+            target_x_steps, target_y_steps,
+            first_approach[0], first_approach[1],
+        )
+        result["approach_from_x_steps"] = approach_x_steps
+        result["approach_from_y_steps"] = approach_y_steps
+        result["scan_step"] = 1
 
         # Fotoğraf marker'ları piksel konumlarını ayrı listede tutar. Tabloda
         # ise kullanıcının göreceği gerçek hedef Pitch/Yaw açıları bulunur.
@@ -1986,6 +2113,7 @@ QGroupBox::title {
             self._set_step_target_data(
                 pitch_item, yaw_item,
                 target_x_steps[row], target_y_steps[row],
+                approach_x_steps[row], approach_y_steps[row],
             )
             self.table.setItem(row, 0, pitch_item)
             self.table.setItem(row, 1, yaw_item)
@@ -2026,19 +2154,15 @@ QGroupBox::title {
             if len(angle_rows) <= 1:
                 QMessageBox.information(self, "Bilgi", "En az 2 açı noktası kaydetmelisiniz.")
                 return
-            if (self._current_point_kind != "stored_angle"
-                    or self._current_point_row not in angle_rows):
-                QMessageBox.warning(
-                    self, "Konum Bilinmiyor",
-                    "Motor bilinen bir Store Point hedefinde değil. "
-                    "Oklarla hedefe gidip Store Point ile konumu yeniden kaydedin.",
-                )
-                return
-            current_index = angle_rows.index(self._current_point_row)
-            if current_index == 0:
-                QMessageBox.information(self, "Bilgi", "İlk açı noktasındasınız.")
-                return
-            row = angle_rows[current_index - 1]
+            if (self._current_point_kind == "stored_angle"
+                    and self._current_point_row in angle_rows
+                    and self._current_point_row != angle_rows[-1]):
+                current_index = angle_rows.index(self._current_point_row)
+                row = angle_rows[current_index + 1]
+            else:
+                # Bilinmeyen konumda veya serinin sonunda Next Point yeni
+                # çevrimi ilk noktadan ve onun kayıtlı yaklaşımından başlatır.
+                row = angle_rows[0]
             print(f"[NextPoint-angle] current={self._current_point_row} target={row}")
             sys.stdout.flush()
             ok = self._goto_angle_row(row, wait_s=0.0)
@@ -2062,6 +2186,12 @@ QGroupBox::title {
         yaw_d = list(self._planner_result.get("yaw_steps_delta", []))
         target_x_steps = list(self._planner_result.get("target_x_steps", []))
         target_y_steps = list(self._planner_result.get("target_y_steps", []))
+        approach_x_steps = list(
+            self._planner_result.get("approach_from_x_steps", [])
+        )
+        approach_y_steps = list(
+            self._planner_result.get("approach_from_y_steps", [])
+        )
         dpy = list(self._planner_result.get("dpy", []))
         plan_type = str(self._planner_result.get("plan_type", "sequential"))
         scan_step = int(self._planner_result.get("scan_step", -1))
@@ -2077,31 +2207,25 @@ QGroupBox::title {
             QMessageBox.critical(self, "Hata", "Planner hedef açı listesi uyumsuz.")
             return
         if (len(target_x_steps) != len(dpy)
-                or len(target_y_steps) != len(dpy)):
+                or len(target_y_steps) != len(dpy)
+                or len(approach_x_steps) != len(dpy)
+                or len(approach_y_steps) != len(dpy)):
             QMessageBox.critical(self, "Hata", "Kesin step hedef listesi uyumsuz.")
             return
 
-        if (self._current_point_kind != plan_type
-                or not isinstance(self._current_point_row, int)
-                or not 0 <= self._current_point_row <= total_seg):
-            QMessageBox.warning(
-                self, "Konum Bilinmiyor",
-                "Motor bu planın bilinen bir hedefinde değil. Noktaları yeniden oluşturun.",
-            )
-            return
-
-        end_row = 0 if scan_step < 0 else total_seg
-        if self._current_point_row == end_row:
-            QMessageBox.information(self, "Bilgi", "Planın son tarama noktasındasınız.")
-            return
-
-        current_row = self._current_point_row
-        target_row = current_row + scan_step
+        if (self._current_point_kind == plan_type
+                and isinstance(self._current_point_row, int)
+                and 0 <= self._current_point_row < total_seg):
+            target_row = self._current_point_row + 1
+        else:
+            target_row = 0
 
         self._clear_log_target()
         if not self._move_to_step_target(
                 target_row, target_x_steps[target_row],
-                target_y_steps[target_row], plan_type):
+                target_y_steps[target_row], plan_type,
+                approach_from=(approach_x_steps[target_row],
+                               approach_y_steps[target_row])):
             self._mark_position_unknown()
             if not self._scan_cancel_requested:
                 QMessageBox.critical(
@@ -2119,7 +2243,7 @@ QGroupBox::title {
         ÜÇ MOD:
         1) Eğer tabloda pvStorePoint ile kaydedilmiş 'angle' satırları varsa:
            - Bunların tamamına sırayla gider (row0 → row1 → ...).
-        2) Sequential planner sonucunu Last→First tarar.
+        2) Sequential planner sonucunu First→Last tarar.
         3) Area planner sonucunu D'den başlayarak serpantin sırada tarar.
         """
         if self._scan_sequence_active:
@@ -2137,21 +2261,16 @@ QGroupBox::title {
                 wait_s = 0.0
             wait_s = max(0.0, wait_s)
 
-            if (self._current_point_kind != "stored_angle"
-                    or self._current_point_row not in angle_rows):
-                QMessageBox.warning(
-                    self, "Konum Bilinmiyor",
-                    "Otomatik tarama için motor bilinen bir Store Point hedefinde olmalıdır.",
-                )
-                return
             if self.motorX.is_busy() or self.motorY.is_busy():
                 QMessageBox.warning(self, "Motor Meşgul", "Motor hareketi devam ediyor.")
                 return
-            current_index = angle_rows.index(self._current_point_row)
-            scan_rows = list(reversed(angle_rows[:current_index + 1]))
+            scan_rows = list(angle_rows)
 
             print("\n=== AÇISAL SCAN BAŞLIYOR (pvStorePoint noktaları) ===")
-            print(f"Kalan nokta: {len(scan_rows)}, yön=Last→First, interval={wait_s:.3f} s")
+            print(
+                f"Nokta: {len(scan_rows)}, yön=First→Last, "
+                f"kayıtlı yaklaşım etkin, interval={wait_s:.3f} s"
+            )
             sys.stdout.flush()
 
             self._scan_sequence_active = True
@@ -2196,6 +2315,12 @@ QGroupBox::title {
             yaw_d = list(self._planner_result.get("yaw_steps_delta", []))
             target_x_steps = list(self._planner_result.get("target_x_steps", []))
             target_y_steps = list(self._planner_result.get("target_y_steps", []))
+            approach_x_steps = list(
+                self._planner_result.get("approach_from_x_steps", [])
+            )
+            approach_y_steps = list(
+                self._planner_result.get("approach_from_y_steps", [])
+            )
             dpy = list(self._planner_result.get("dpy", []))
             plan_type = str(self._planner_result.get("plan_type", "sequential"))
             scan_step = int(self._planner_result.get("scan_step", -1))
@@ -2208,50 +2333,27 @@ QGroupBox::title {
             if len(dpy) != total_seg + 1:
                 raise RuntimeError("Planner hedef açı listesi uyumsuz.")
             if (len(target_x_steps) != len(dpy)
-                    or len(target_y_steps) != len(dpy)):
+                    or len(target_y_steps) != len(dpy)
+                    or len(approach_x_steps) != len(dpy)
+                    or len(approach_y_steps) != len(dpy)):
                 raise RuntimeError("Kesin step hedef listesi uyumsuz.")
 
-            if (self._current_point_kind != plan_type
-                    or not isinstance(self._current_point_row, int)
-                    or not 0 <= self._current_point_row <= total_seg):
-                raise RuntimeError(
-                    "Motor bu planın bilinen bir hedefinde değil. "
-                    "Plan noktalarını yeniden oluşturun."
-                )
             if self.motorX.is_busy() or self.motorY.is_busy():
                 raise RuntimeError("Motor hareketi devam ediyor.")
-            start_row = self._current_point_row
-            end_row = 0 if scan_step < 0 else total_seg
             self._scan_sequence_active = True
 
-            direction_text = "Last→First" if scan_step < 0 else "D→Serpentine End"
+            direction_text = "First→Last (kayıtlı yaklaşım)"
             print(f"\n=== {plan_type.upper()} TARAMA BAŞLIYOR ({direction_text}) ===")
-            print(f"Başlangıç satırı: {start_row}, bitiş satırı: {end_row}")
-            print(f"İlk hareketten önce bekleme (idle + {wait_s:.3f}s): {wait_s:.3f} s")
+            print(f"Başlangıç satırı: 0, bitiş satırı: {total_seg}")
             sys.stdout.flush()
 
-            _, start_pitch, start_yaw = dpy[start_row]
-            self._set_log_target(start_row, start_pitch, start_yaw)
-
-            # 0) İlk girişte bekle: busy ise önce idle, sonra wait_s
-            if wait_s > 0:
-                if not self._wait_both_idle(timeout_ms=120000):
-                    raise RuntimeError("Başlangıçta idle beklerken zaman aşımı.")
-                print(f"[idle] başlangıç idle tamam. {wait_s:.3f}s bekleniyor...")
-                sys.stdout.flush()
-                if not self._wait_seconds(wait_s):
-                    self._scan_sequence_active = False
-                    self._clear_log_target()
-                    return
-
-            current_row = start_row
-            while current_row != end_row:
-                target_row = current_row + scan_step
-
+            for target_row in range(total_seg + 1):
                 self._clear_log_target()
                 if not self._move_to_step_target(
                         target_row, target_x_steps[target_row],
-                        target_y_steps[target_row], plan_type):
+                        target_y_steps[target_row], plan_type,
+                        approach_from=(approach_x_steps[target_row],
+                                       approach_y_steps[target_row])):
                     if self._scan_cancel_requested:
                         self._scan_sequence_active = False
                         self._clear_log_target()
@@ -2261,10 +2363,9 @@ QGroupBox::title {
                 print("            [idle] iki motor da idle.")
                 sys.stdout.flush()
 
-                current_row = target_row
-                _, target_pitch, target_yaw = dpy[current_row]
-                self._set_log_target(current_row, target_pitch, target_yaw)
-                self._set_current_point(plan_type, current_row)
+                _, target_pitch, target_yaw = dpy[target_row]
+                self._set_log_target(target_row, target_pitch, target_yaw)
+                self._set_current_point(plan_type, target_row)
 
                 # Segmentler arası bekleme, sadece idle olduktan sonra başlar
                 if wait_s > 0:

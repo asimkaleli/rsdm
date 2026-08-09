@@ -2,7 +2,7 @@ import unittest
 
 from laser_path_planner import (
     StepperConfig, _dpy_to_step_deltas, anchored_step_targets,
-    plan_grid_path, planned_move_steps,
+    plan_grid_path, planned_move_steps, recorded_approach_sources,
 )
 
 
@@ -140,6 +140,29 @@ class GridPlannerTests(unittest.TestCase):
             anchored_step_targets([1], [1, 2], 0, 0, 0)
         with self.assertRaises(IndexError):
             anchored_step_targets([1], [2], 2, 0, 0)
+
+    def test_recorded_approach_replays_first_source_then_forward_path(self):
+        from_x, from_y = recorded_approach_sources(
+            [100, 120, 150], [200, 190, 230], 80, 260
+        )
+        self.assertEqual(from_x, [80, 100, 120])
+        self.assertEqual(from_y, [260, 200, 190])
+
+    def test_selected_point_can_override_generated_approach_source(self):
+        from_x, from_y = recorded_approach_sources(
+            [100, 120, 150], [200, 190, 230], 80, 260,
+            overrides={2: (170, 180)},
+        )
+        self.assertEqual(from_x, [80, 100, 170])
+        self.assertEqual(from_y, [260, 200, 180])
+
+    def test_recorded_approach_validates_coordinates_and_overrides(self):
+        with self.assertRaises(ValueError):
+            recorded_approach_sources([], [], 0, 0)
+        with self.assertRaises(ValueError):
+            recorded_approach_sources([1], [2, 3], 0, 0)
+        with self.assertRaises(IndexError):
+            recorded_approach_sources([1], [2], 0, 0, {1: (3, 4)})
 
 
 if __name__ == "__main__":
