@@ -34,6 +34,7 @@ from laser_gpio import LaserGPIO
 
 from orientation import OrientationWorker
 from motor_control import MotorController, MotorPins, SharedPins
+from motor_trace import MotorTraceLogger
 from backlash import DEFAULT_BACKLASH_STEPS
 
 # Yalnızca planlayıcıyı kullanacağız (fallback yok)
@@ -133,6 +134,7 @@ QGroupBox::title {
         self._scan_sequence_active = False
         self._scan_cancel_requested = False
         self._area_corners = {}
+        self.motor_trace = None
 
         # --- Motorlar ve lazer ---
         try:
@@ -153,6 +155,23 @@ QGroupBox::title {
             )  # Pitch ~ yukarı/aşağı
 
             # Adım sayaç/durum (seçim aralığını ölçmek için)
+            try:
+                self.motor_trace = MotorTraceLogger()
+                self.motorX.worker.trace.connect(
+                    lambda record: self.motor_trace.record("x", record),
+                    Qt.DirectConnection,
+                )
+                self.motorY.worker.trace.connect(
+                    lambda record: self.motor_trace.record("y", record),
+                    Qt.DirectConnection,
+                )
+                print(f"[motor-trace] {self.motor_trace.path}")
+                sys.stdout.flush()
+            except Exception as trace_error:
+                self.motor_trace = None
+                print(f"[motor-trace] BASLATILAMADI: {trace_error}")
+                sys.stdout.flush()
+
             self._track_steps = False
             self._sx_right = 0
             self._sx_left = 0
@@ -1217,6 +1236,22 @@ QGroupBox::title {
             return None
         return int(x_steps), int(y_steps)
 
+    def _trace_motor_state(self, axis: str, event: str, **values):
+        """Add a GUI-level target/save marker to the motor pulse trace."""
+        if self.motor_trace is None:
+            return
+        motor = self.motorX if axis == "x" else self.motorY
+        snapshot = motor.backlash_snapshot()
+        self.motor_trace.record(
+            axis,
+            event=event,
+            raw_position_steps=int(motor.position_steps()),
+            logical_position_steps=snapshot.logical_position_steps,
+            gap_steps=snapshot.gap_steps,
+            backlash_steps=snapshot.backlash_steps,
+            **values,
+        )
+
     def _move_to_absolute_target(self, row: int, target_x: int, target_y: int,
                                  target_kind: str) -> bool:
         """Move directly to one backlash-compensated logical target."""
@@ -1229,6 +1264,14 @@ QGroupBox::title {
         before_raw_x = int(self.motorX.position_steps())
         before_raw_y = int(self.motorY.position_steps())
         target_x, target_y = int(target_x), int(target_y)
+        self._trace_motor_state(
+            "x", "target_start", row=row, target_kind=target_kind,
+            target_position_steps=target_x,
+        )
+        self._trace_motor_state(
+            "y", "target_start", row=row, target_kind=target_kind,
+            target_position_steps=target_y,
+        )
         print(
             f"[step-target-{target_kind}] row={row} "
             f"current=({current_x},{current_y}) "
@@ -1241,6 +1284,14 @@ QGroupBox::title {
         sys.stdout.flush()
         if not self._move_both_logical_and_wait(
                 target_x, target_y, timeout_ms=300000):
+            self._trace_motor_state(
+                "x", "target_abort", row=row, target_kind=target_kind,
+                target_position_steps=target_x,
+            )
+            self._trace_motor_state(
+                "y", "target_abort", row=row, target_kind=target_kind,
+                target_position_steps=target_y,
+            )
             return False
         self._sync_absolute_steps()
         after_x = self.motorX.backlash_snapshot()
@@ -1249,6 +1300,14 @@ QGroupBox::title {
         after_raw_y = int(self.motorY.position_steps())
         reached = (self._steps_x_abs == target_x
                    and self._steps_y_abs == target_y)
+        self._trace_motor_state(
+            "x", "target_finish", row=row, target_kind=target_kind,
+            target_position_steps=target_x, message=f"ok={reached}",
+        )
+        self._trace_motor_state(
+            "y", "target_finish", row=row, target_kind=target_kind,
+            target_position_steps=target_y, message=f"ok={reached}",
+        )
         print(
             f"[step-target-{target_kind}] row={row} "
             f"reached=({self._steps_x_abs},{self._steps_y_abs}) "
@@ -1856,6 +1915,14 @@ QGroupBox::title {
             f"relative=({sx - self._origin_steps_x},{sy - self._origin_steps_y})"
         )
         sys.stdout.flush()
+        self._trace_motor_state(
+            "x", "point_saved", row=row, target_kind="stored",
+            target_position_steps=sx,
+        )
+        self._trace_motor_state(
+            "y", "point_saved", row=row, target_kind="stored",
+            target_position_steps=sy,
+        )
 
         # Silme butonu ekle (3. sütun)
         btn = self._make_delete_btn(framed=True)
@@ -2639,6 +2706,7 @@ QGroupBox::title {
         self._safe(lambda: self.ori_worker and self.ori_worker.wait(3000))
         self._safe(lambda: self.motorX and self.motorX.shutdown())
         self._safe(lambda: self.motorY and self.motorY.shutdown())
+        self._safe(lambda: self.motor_trace and self.motor_trace.close())
         self._safe(lambda: self.laser and self.laser.release())
         self._safe(lambda: self.shared and self.shared.set_enable(False))
 

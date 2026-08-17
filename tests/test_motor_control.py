@@ -116,10 +116,12 @@ class StepperWorkerTests(unittest.TestCase):
 
     def test_signed_moves_are_atomic_and_finish(self):
         steps = []
+        traces = []
         finished = []
         timing_reports = []
         done = threading.Event()
         self.worker.step.connect(steps.append)
+        self.worker.trace.connect(traces.append)
         self.worker.timingReport.connect(
             lambda count, mean_ms, jitter_ms: timing_reports.append(
                 (count, mean_ms, jitter_ms)
@@ -144,6 +146,16 @@ class StepperWorkerTests(unittest.TestCase):
         self.assertTrue(all(report[1] > 0 for report in timing_reports))
         self.assertEqual(self.worker.position_steps(), 2)
         self.assertFalse(self.worker.is_busy())
+        pulse_batches = [
+            record for record in traces if record["event"] == "pulse_batch"
+        ]
+        self.assertEqual(sum(r["batch_delta"] for r in pulse_batches), 2)
+        self.assertEqual(sum(abs(r["batch_delta"]) for r in pulse_batches), 8)
+        self.assertEqual(pulse_batches[-1]["raw_position_steps"], 2)
+        self.assertEqual(
+            [r["requested_steps"] for r in traces if r["event"] == "move_start"],
+            [5, -3],
+        )
 
     def test_single_step_move_outputs_exactly_one_complete_pulse(self):
         steps = []

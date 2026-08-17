@@ -105,6 +105,7 @@ class StepperWorker(QObject):
     moveFinished = Signal(int, bool)  # move_id, completed; False means cancelled
     timingReport = Signal(int, float, float)  # pulse intervals, mean period ms, max jitter ms
     pulsePhaseReport = Signal(int, float, float, float, float)
+    trace = Signal(object)
     # samples, min HIGH ms, max HIGH ms, min LOW ms, max LOW ms
 
     def __init__(
@@ -218,8 +219,25 @@ class StepperWorker(QObject):
         delta = self._pending_step_delta
         self._pending_step_delta = 0
         self._last_step_emit_s = now
+        self._trace_event("pulse_batch", batch_delta=int(delta))
         self.progress.emit(self._total)
         self.step.emit(delta)
+
+    def _trace_event(self, event: str, **values):
+        """Publish a lossless pulse/state record without doing file I/O here."""
+        with self._state_lock:
+            snapshot = self._backlash_state.snapshot()
+            record = {
+                "event": str(event),
+                "monotonic_ns": time.monotonic_ns(),
+                "total_pulses": int(self._total),
+                "raw_position_steps": int(self._position_steps),
+                "logical_position_steps": snapshot.logical_position_steps,
+                "gap_steps": snapshot.gap_steps,
+                "backlash_steps": snapshot.backlash_steps,
+            }
+        record.update(values)
+        self.trace.emit(record)
 
     def _reset_timing(self):
         self._timing_count = 0
@@ -352,11 +370,18 @@ class StepperWorker(QObject):
                 self._backlash_state.initialize(
                     loaded_direction, logical_position_steps
                 )
-                return self._backlash_state.snapshot()
+                snapshot = self._backlash_state.snapshot()
+        self._trace_event(
+            "backlash_initialize",
+            direction=int(loaded_direction),
+            message=f"logical_zero={int(logical_position_steps)}",
+        )
+        return snapshot
 
     def invalidate_backlash(self):
         with self._state_lock:
             self._backlash_state.invalidate()
+        self._trace_event("backlash_invalidate")
 
     def backlash_snapshot(self):
         with self._state_lock:
@@ -375,9 +400,11 @@ class StepperWorker(QObject):
         self._continuous_requested_direction = 0
         if not self._continuous_direction:
             return
+        stopped_direction = self._continuous_direction
         self._continuous_direction = 0
         self._emit_step_update(force=True)
         self._emit_timing_report()
+        self._trace_event("continuous_stop", direction=stopped_direction)
 
     def _start_requested_continuous_in_worker(self):
         direction = self._continuous_requested_direction
@@ -388,6 +415,7 @@ class StepperWorker(QObject):
         self._wake(True)
         self._forward = direction > 0
         self._apply_dir()
+        self._trace_event("continuous_start", direction=direction)
 
     def _cancel_moves_in_worker(self):
         cancelled = []
@@ -403,6 +431,7 @@ class StepperWorker(QObject):
         # Commands already ahead of this cancel are handled in order by
         # _handle_commands; commands queued afterwards remain valid.
         for move_id in cancelled:
+            self._trace_event("move_cancel", move_id=move_id)
             self.moveFinished.emit(move_id, False)
 
     def _handle_commands(self):
@@ -501,6 +530,12 @@ class StepperWorker(QObject):
                     self._wake(True)
                     self._forward = signed_steps > 0
                     self._apply_dir()
+                    self._trace_event(
+                        "move_start",
+                        move_id=move_id,
+                        requested_steps=signed_steps,
+                        direction=1 if signed_steps > 0 else -1,
+                    )
                     self.moveStarted.emit(move_id, signed_steps)
 
                 if (self._active_move is None and not self._moves
@@ -515,6 +550,7 @@ class StepperWorker(QObject):
                         self._active_move = None
                         self._emit_step_update(force=True)
                         self._emit_timing_report()
+                        self._trace_event("move_finish", move_id=move_id)
                         self.moveFinished.emit(move_id, True)
                 elif self._continuous_direction:
                     self._pulse_once(edge_s=self._movement_edge_s())
@@ -541,6 +577,9 @@ class StepperWorker(QObject):
                 self._step_line.set_value(0)
             except Exception:
                 pass
+            # Preserve every pulse that completed before an unexpected worker
+            # error, even when the normal batch threshold was not reached.
+            self._emit_step_update(force=True)
             self._set_busy(False)
             self.finished.emit()
 
@@ -572,6 +611,7 @@ class MotorController(QObject):
     moveFinished = Signal(int, bool)
     timingReport = Signal(int, float, float)
     pulsePhaseReport = Signal(int, float, float, float, float)
+    trace = Signal(object)
 
     def __init__(
         self,
@@ -595,6 +635,7 @@ class MotorController(QObject):
         self.worker.moveFinished.connect(self.moveFinished)
         self.worker.timingReport.connect(self.timingReport)
         self.worker.pulsePhaseReport.connect(self.pulsePhaseReport)
+        self.worker.trace.connect(self.trace)
         self.th.started.connect(self.worker.run)
         self.th.start()
 
