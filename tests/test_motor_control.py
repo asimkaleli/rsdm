@@ -103,7 +103,7 @@ class StepperWorkerTests(unittest.TestCase):
     def setUp(self):
         motor_control._Chip._chip = None
         self.worker = motor_control.StepperWorker(
-            motor_control.MotorPins(step=12, dir=5)
+            motor_control.MotorPins(step=12, dir=5), backlash_steps=40
         )
         self.worker.set_speed_ms(0.5)
         self.thread = threading.Thread(target=self.worker.run, daemon=True)
@@ -165,15 +165,111 @@ class StepperWorkerTests(unittest.TestCase):
         self.assertEqual(self.worker._step_line.values[-2:], [1, 0])
         self.assertFalse(self.worker.is_busy())
 
+    def test_emitted_motor_pulses_update_backlash_state(self):
+        finished = []
+        done = threading.Event()
+
+        def on_finished(move_id, completed):
+            finished.append((move_id, completed))
+            if len(finished) == 3:
+                done.set()
+
+        self.worker.moveFinished.connect(on_finished)
+        self.worker.initialize_backlash(+1)
+        self.worker.submit_move(+5)
+        self.worker.submit_move(-5)
+        self.worker.submit_move(+10)
+
+        self.assertTrue(done.wait(2))
+        snapshot = self.worker.backlash_snapshot()
+        self.assertEqual(snapshot.logical_position_steps, 10)
+        self.assertEqual(snapshot.gap_steps, 40)
+        self.assertEqual(self.worker.logical_position_steps(), 10)
+        self.assertEqual(self.worker.position_steps(), 10)
+
+    def test_logical_target_is_compensated_and_reached(self):
+        first_done = threading.Event()
+        target_done = threading.Event()
+        target_move_id = {"value": None}
+        started_steps = []
+
+        def on_finished(move_id, completed):
+            self.assertTrue(completed)
+            if target_move_id["value"] == move_id:
+                target_done.set()
+            else:
+                first_done.set()
+
+        self.worker.moveFinished.connect(on_finished)
+        self.worker.moveStarted.connect(
+            lambda _move_id, signed_steps: started_steps.append(signed_steps)
+        )
+        self.worker.initialize_backlash(+1, logical_position_steps=1000)
+        self.worker.submit_move(-25)
+        self.assertTrue(first_done.wait(1))
+        idle_deadline = time.monotonic() + 1.0
+        while self.worker.is_busy() and time.monotonic() < idle_deadline:
+            time.sleep(0.001)
+        self.assertFalse(self.worker.is_busy())
+        self.assertEqual(self.worker.backlash_snapshot().gap_steps, 15)
+
+        target_move_id["value"] = self.worker.submit_logical_target(1030)
+        self.assertTrue(target_done.wait(2))
+        snapshot = self.worker.backlash_snapshot()
+        self.assertEqual(started_steps, [-25, 55])
+        self.assertEqual(snapshot.logical_position_steps, 1030)
+        self.assertEqual(snapshot.gap_steps, 40)
+        # Raw: -25 clearance pulses followed by +55 compensated pulses.
+        self.assertEqual(self.worker.position_steps(), 30)
+
+    def test_logical_target_requires_initialized_idle_axis(self):
+        with self.assertRaises(RuntimeError):
+            self.worker.submit_logical_target(10)
+
+        self.worker.initialize_backlash(+1)
+        started = threading.Event()
+        self.worker.moveStarted.connect(lambda *_: started.set())
+        self.worker.submit_move(500)
+        self.assertTrue(started.wait(1))
+        with self.assertRaises(RuntimeError):
+            self.worker.submit_logical_target(10)
+        with self.assertRaises(RuntimeError):
+            self.worker.initialize_backlash(-1)
+        self.worker.cancel_moves()
+
+    def test_disable_invalidates_backlash_state(self):
+        self.worker.initialize_backlash(+1)
+        self.assertTrue(self.worker.backlash_snapshot().initialized)
+        self.worker.enable(False)
+
+        deadline = time.monotonic() + 1.0
+        while (
+            self.worker.backlash_snapshot().initialized
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.001)
+
+        self.assertFalse(self.worker.backlash_snapshot().initialized)
+
     def test_controller_routes_signed_move_to_atomic_worker_api(self):
         class WorkerStub:
             def __init__(self):
                 self.moves = []
+                self.logical_targets = []
                 self.continuous = []
+                self.initializations = []
 
             def submit_move(self, signed_steps):
                 self.moves.append(signed_steps)
                 return 42
+
+            def submit_logical_target(self, target_steps):
+                self.logical_targets.append(target_steps)
+                return 43
+
+            def initialize_backlash(self, direction, logical_position):
+                self.initializations.append((direction, logical_position))
+                return "snapshot"
 
             def start_continuous(self, direction):
                 self.continuous.append(("start", direction))
@@ -188,6 +284,13 @@ class StepperWorkerTests(unittest.TestCase):
 
         self.assertEqual(move_id, 42)
         self.assertEqual(controller.worker.moves, [-1])
+
+        logical_move_id = controller.move_to_logical_position(125)
+        snapshot = controller.initialize_backlash(-1, 10)
+        self.assertEqual(logical_move_id, 43)
+        self.assertEqual(snapshot, "snapshot")
+        self.assertEqual(controller.worker.logical_targets, [125])
+        self.assertEqual(controller.worker.initializations, [(-1, 10)])
 
         controller.start_continuous(1)
         controller.stop_continuous()

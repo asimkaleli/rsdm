@@ -34,11 +34,11 @@ from laser_gpio import LaserGPIO
 
 from orientation import OrientationWorker
 from motor_control import MotorController, MotorPins, SharedPins
+from backlash import DEFAULT_BACKLASH_STEPS
 
 # Yalnızca planlayıcıyı kullanacağız (fallback yok)
 from laser_path_planner import (
-    anchored_step_targets, plan_grid_path, plan_laser_path,
-    recorded_approach_sources, StepperConfig,
+    anchored_step_targets, plan_grid_path, plan_laser_path, StepperConfig,
 )
 
 from datetime import datetime
@@ -46,8 +46,6 @@ from datetime import datetime
 T = TypeVar("T")
 TARGET_X_STEPS_ROLE = Qt.UserRole + 1
 TARGET_Y_STEPS_ROLE = Qt.UserRole + 2
-APPROACH_FROM_X_STEPS_ROLE = Qt.UserRole + 3
-APPROACH_FROM_Y_STEPS_ROLE = Qt.UserRole + 4
 
 class rsdm(QWidget):
     # ----------- KALİBRASYON (kendine göre güncelle) -----------
@@ -62,6 +60,8 @@ class rsdm(QWidget):
     GEAR_RATIO_Y = 10
 
     DISTANCE_MIN_FRESHNESS_S = 2.0
+    BACKLASH_X_STEPS = DEFAULT_BACKLASH_STEPS["x"]
+    BACKLASH_Y_STEPS = DEFAULT_BACKLASH_STEPS["y"]
 
     def __init__(self):
         super(rsdm, self).__init__()
@@ -144,10 +144,12 @@ QGroupBox::title {
 
             # 2) Motorlar
             self.motorX = MotorController(
-                MotorPins(step=12, dir=5), shared=self.shared
+                MotorPins(step=12, dir=5), shared=self.shared,
+                backlash_steps=self.BACKLASH_X_STEPS,
             )  # Yaw ~ sağ/sol
             self.motorY = MotorController(
-                MotorPins(step=13, dir=6, dir_inverted=True), shared=self.shared
+                MotorPins(step=13, dir=6, dir_inverted=True), shared=self.shared,
+                backlash_steps=self.BACKLASH_Y_STEPS,
             )  # Pitch ~ yukarı/aşağı
 
             # Adım sayaç/durum (seçim aralığını ölçmek için)
@@ -200,24 +202,17 @@ QGroupBox::title {
         self._y_up_pressed = False
         self._y_down_pressed = False
         self._manual_continuous_axis = {"x": None, "y": None}
-        self._last_manual_approach = {"x": None, "y": None}
-        # Her eksende son manuel yaklaşmanın başladığı kesin pulse konumu.
-        # Nokta kaydında hedefle birlikte saklanır ve geri dönüşte aynı son
-        # yaklaşma yönünü yeniden üretmek için kullanılır.
-        self._manual_approach_from_steps = {
-            "x": int(self.motorX.position_steps())
-            if hasattr(self, "motorX") else 0,
-            "y": int(self.motorY.position_steps())
-            if hasattr(self, "motorY") else 0,
+        # Backlash initialization uses the most recent manual direction of
+        # each axis as the known loaded flank.
+        self._last_manual_direction = {"x": None, "y": None}
+        self._manual_preload_start_raw = {
+            "x": int(self.motorX.position_steps()),
+            "y": int(self.motorY.position_steps()),
         }
-        self._pending_area_approach = {}
-
         # Sequential endpoint positions are read directly from the motor
         # workers, independently of queued Qt step-update signals.
         self._seq_first_steps = None
         self._seq_last_steps = None
-        self._seq_first_approach_steps = None
-        self._seq_last_approach_steps = None
 
         # --- Plan çıktısı ---
         self._planner_result = None  # dict: xyz, dpy, pitch_steps_delta, yaw_steps_delta
@@ -238,6 +233,7 @@ QGroupBox::title {
         # --- Hız combobox varsayılanı uygulansın (UI hazır olduğunda) ---
         if self.ui.cbMotorSpeed:
             QTimer.singleShot(0, self._apply_initial_speed_from_combo)
+        self._update_backlash_status()
 
         app = QApplication.instance()
         if app:
@@ -328,6 +324,10 @@ QGroupBox::title {
         self.ui.tmpLe = self.w(QLineEdit, "tmpLe", required=False)
 
         self.ui.cbMotorSpeed = self.w(QComboBox, "cbMotorSpeed", required=False)
+        self.ui.backlashInitialize = self.w(
+            QPushButton, "backlashInitializePb"
+        )
+        self.ui.backlashStatus = self.w(QLabel, "backlashStatusLabel")
 
         # Manuel nokta kaydetme butonu (Pitch/Yaw)
         self.ui.pbStorePoint = self.w(QPushButton, "pbStorePoint", required=False)
@@ -405,9 +405,183 @@ QGroupBox::title {
         self.ui.pbEmergencyStop.clicked.connect(self.on_emergency_stop_clicked)
         # Pitch/Yaw nokta kaydetme (pbStorePoint)
         self.ui.pbStorePoint.clicked.connect(self.on_pb_store_point)
+        self.ui.backlashInitialize.clicked.connect(
+            self.on_initialize_backlash_clicked
+        )
 
         self.ui.pbStartLogging.clicked.connect(self.on_pb_start_logging)
         self.ui.pbStopLogging.clicked.connect(self.on_pb_stop_logging)
+
+    def _backlash_ready(self) -> bool:
+        if not hasattr(self, "motorX") or not hasattr(self, "motorY"):
+            return False
+        return (
+            self.motorX.backlash_snapshot().initialized
+            and self.motorY.backlash_snapshot().initialized
+        )
+
+    def _update_backlash_status(self):
+        if not hasattr(self, "ui") or not self.ui.backlashStatus:
+            return
+        ready = self._backlash_ready()
+        self.ui.backlashStatus.setText(
+            "Backlash: READY" if ready else "Backlash: NOT INITIALIZED"
+        )
+        color = "#2e7d32" if ready else "#c62828"
+        self.ui.backlashStatus.setStyleSheet(
+            f"color: {color}; font-weight: 700;"
+        )
+
+    def _require_backlash_ready(self, title: str) -> bool:
+        if self._backlash_ready():
+            return True
+        self._update_backlash_status()
+        QMessageBox.warning(
+            self,
+            title,
+            "Önce X ve Y eksenlerini güvenli yönlerde, lazer noktası hareket "
+            "edene kadar manuel hareket ettirin. Ardından Initialize Backlash "
+            "butonuna basın.",
+        )
+        return False
+
+    def on_initialize_backlash_clicked(self):
+        """Use each axis' last manual direction as its known loaded flank."""
+        if self._scan_sequence_active or self._programmatic_motion_active:
+            QMessageBox.warning(
+                self, "Backlash", "Programlı motor hareketi devam ediyor."
+            )
+            return
+        if any(
+            direction is not None
+            for direction in self._manual_continuous_axis.values()
+        ):
+            QMessageBox.warning(
+                self, "Backlash", "Önce bütün yön tuşlarını bırakın."
+            )
+            return
+
+        missing_axes = [
+            axis.upper()
+            for axis in ("x", "y")
+            if self._last_manual_direction.get(axis) is None
+        ]
+        if missing_axes:
+            QMessageBox.warning(
+                self,
+                "Backlash",
+                "Initialization öncesinde her ekseni bir dişli yüzeyine "
+                "yaslamak gerekir. Manuel hareket yapılmayan eksen: "
+                + ", ".join(missing_axes),
+            )
+            return
+        if not self._wait_both_idle(timeout_ms=5000, settle_ms=150):
+            QMessageBox.warning(
+                self, "Backlash", "Motorlar tamamen durmadı; işlem iptal edildi."
+            )
+            return
+
+        current_raw = {
+            "x": int(self.motorX.position_steps()),
+            "y": int(self.motorY.position_steps()),
+        }
+        preload_requirements = {
+            "x": self.BACKLASH_X_STEPS + 1,
+            "y": self.BACKLASH_Y_STEPS + 1,
+        }
+        insufficient = []
+        for axis in ("x", "y"):
+            expected_sign = self._manual_direction_sign(
+                axis, self._last_manual_direction[axis]
+            )
+            signed_travel = (
+                current_raw[axis] - self._manual_preload_start_raw[axis]
+            )
+            measured_travel = (
+                signed_travel * expected_sign if signed_travel else 0
+            )
+            required = preload_requirements[axis]
+            if measured_travel < required:
+                insufficient.append(
+                    f"{axis.upper()}: {max(0, measured_travel)}/{required} pulse"
+                )
+        if insufficient:
+            QMessageBox.warning(
+                self,
+                "Backlash",
+                "Son seçilen yönde boşluğun tamamen kapanması için hareket "
+                "yetersiz:\n" + "\n".join(insufficient),
+            )
+            return
+
+        has_existing_targets = bool(
+            self.table.rowCount() or self._planner_result
+            or self._origin_steps_x is not None
+            or self._origin_steps_y is not None
+        )
+        if self._backlash_ready() or has_existing_targets:
+            answer = QMessageBox.question(
+                self,
+                "Backlash Initialization",
+                "Logical konum yeniden sıfırlanacak ve mevcut hedefler "
+                "silinecek. Devam edilsin mi?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                return
+
+        x_direction = self._manual_direction_sign(
+            "x", self._last_manual_direction["x"]
+        )
+        y_direction = self._manual_direction_sign(
+            "y", self._last_manual_direction["y"]
+        )
+        try:
+            self.motorX.initialize_backlash(x_direction, 0)
+            self.motorY.initialize_backlash(y_direction, 0)
+        except Exception as exc:
+            self.motorX.invalidate_backlash()
+            self.motorY.invalidate_backlash()
+            self._update_backlash_status()
+            QMessageBox.critical(self, "Backlash", str(exc))
+            return
+
+        self._steps_x_abs = 0
+        self._steps_y_abs = 0
+        self._origin_steps_x = None
+        self._origin_steps_y = None
+        self._origin_angle_row = None
+        self._first_distance = None
+        self._last_distance_at_select = None
+        self._seq_first_steps = None
+        self._seq_last_steps = None
+        self._track_steps = False
+        self._planner_result = None
+        self._awaiting_marker_click = False
+        self._last_store_row = None
+        self.table.setRowCount(0)
+        self.label.clear_selection()
+        self.label.markers.clear()
+        self._reset_sequential_selection_labels()
+        self._reset_area_selection()
+        self._mark_position_unknown()
+        self._last_manual_direction = {"x": None, "y": None}
+        self._manual_preload_start_raw = dict(current_raw)
+        self._update_backlash_status()
+
+        print(
+            f"[backlash-ready] X={self.BACKLASH_X_STEPS} gap="
+            f"{self.motorX.backlash_snapshot().gap_steps}  "
+            f"Y={self.BACKLASH_Y_STEPS} gap="
+            f"{self.motorY.backlash_snapshot().gap_steps}"
+        )
+        sys.stdout.flush()
+        QMessageBox.information(
+            self,
+            "Backlash",
+            "Backlash hazır. Mevcut konum logical X=0, Y=0 olarak ayarlandı.",
+        )
 
     def on_emergency_stop_clicked(self):
         """Bekleyen/planlı hareketleri kes ve yazılımsal konumu geçersizleştir."""
@@ -427,9 +601,6 @@ QGroupBox::title {
             self._last_distance_at_select = None
             self._seq_first_steps = None
             self._seq_last_steps = None
-            self._seq_first_approach_steps = None
-            self._seq_last_approach_steps = None
-            self._pending_area_approach.clear()
             self._track_steps = False
             self._awaiting_marker_click = False
             self._last_store_row = None
@@ -437,6 +608,16 @@ QGroupBox::title {
             self._reset_sequential_selection_labels()
             self._reset_area_selection()
             self._mark_position_unknown()
+            if hasattr(self, "motorX") and self.motorX:
+                self.motorX.invalidate_backlash()
+            if hasattr(self, "motorY") and self.motorY:
+                self.motorY.invalidate_backlash()
+            self._last_manual_direction = {"x": None, "y": None}
+            self._manual_preload_start_raw = {
+                "x": int(self.motorX.position_steps()),
+                "y": int(self.motorY.position_steps()),
+            }
+            self._update_backlash_status()
         print("[EMERGENCY STOP] Motor komutları iptal edildi; konum bilinmiyor.")
         sys.stdout.flush()
         QMessageBox.warning(
@@ -802,15 +983,13 @@ QGroupBox::title {
         if active_direction is not None and active_direction != direction:
             self._axis_motor(axis).stop_continuous()
 
-        # Bu basış, ilgili eksendeki son yaklaşma parçasının başlangıcıdır.
-        # Yalnız hareket eden ekseni güncelleriz; diğer eksenin son kayıtlı
-        # yaklaşma başlangıcı korunur.
-        self._manual_approach_from_steps[axis] = int(
-            self._axis_motor(axis).position_steps()
-        )
+        if self._last_manual_direction.get(axis) != direction:
+            self._manual_preload_start_raw[axis] = int(
+                self._axis_motor(axis).position_steps()
+            )
         self._mark_position_unknown()
         self._manual_continuous_axis[axis] = direction
-        self._last_manual_approach[axis] = direction
+        self._last_manual_direction[axis] = direction
         self._axis_motor(axis).start_continuous(
             self._manual_direction_sign(axis, direction)
         )
@@ -819,22 +998,6 @@ QGroupBox::title {
         if self._manual_continuous_axis.get(axis) == direction:
             self._axis_motor(axis).stop_continuous()
             self._manual_continuous_axis[axis] = None
-
-    def _manual_approach_waypoint(self):
-        """Return the per-axis start of the final manual approach."""
-        return (
-            int(self._manual_approach_from_steps["x"]),
-            int(self._manual_approach_from_steps["y"]),
-        )
-
-    def _reset_manual_approach_tracking(self):
-        """Make the current position the neutral source for the next capture."""
-        self._sync_absolute_steps()
-        self._manual_approach_from_steps = {
-            "x": int(self._steps_x_abs),
-            "y": int(self._steps_y_abs),
-        }
-        self._last_manual_approach = {"x": None, "y": None}
 
     # ---------- Hız / speed combo ----------
     def init_speed_combo(self):
@@ -1038,19 +1201,11 @@ QGroupBox::title {
         return rows
 
     @staticmethod
-    def _set_step_target_data(pitch_item, yaw_item, x_steps: int, y_steps: int,
-                              approach_from_x=None, approach_from_y=None):
-        """Attach exact target and recorded approach coordinates to a row."""
+    def _set_step_target_data(pitch_item, yaw_item, x_steps: int, y_steps: int):
+        """Attach exact logical target coordinates to a row."""
         for item in (pitch_item, yaw_item):
             item.setData(TARGET_X_STEPS_ROLE, int(x_steps))
             item.setData(TARGET_Y_STEPS_ROLE, int(y_steps))
-            if approach_from_x is not None and approach_from_y is not None:
-                item.setData(
-                    APPROACH_FROM_X_STEPS_ROLE, int(approach_from_x)
-                )
-                item.setData(
-                    APPROACH_FROM_Y_STEPS_ROLE, int(approach_from_y)
-                )
 
     def _row_step_target(self, row: int):
         item = self.ui.table.item(row, 0)
@@ -1062,33 +1217,23 @@ QGroupBox::title {
             return None
         return int(x_steps), int(y_steps)
 
-    def _row_approach_from(self, row: int):
-        item = self.ui.table.item(row, 0)
-        if item is None:
-            return None
-        from_x = item.data(APPROACH_FROM_X_STEPS_ROLE)
-        from_y = item.data(APPROACH_FROM_Y_STEPS_ROLE)
-        if from_x is None or from_y is None:
-            return None
-        return int(from_x), int(from_y)
-
     def _move_to_absolute_target(self, row: int, target_x: int, target_y: int,
                                  target_kind: str) -> bool:
-        """Move directly to one absolute pulse target."""
+        """Move directly to one backlash-compensated logical target."""
+        if not self._require_backlash_ready("Motor Target"):
+            return False
         self._sync_absolute_steps()
         current_x, current_y = self._steps_x_abs, self._steps_y_abs
         target_x, target_y = int(target_x), int(target_y)
-        delta_x = target_x - current_x
-        delta_y = target_y - current_y
         print(
             f"[step-target-{target_kind}] row={row} "
             f"current=({current_x},{current_y}) "
             f"target=({target_x},{target_y}) "
-            f"delta=({delta_x:+d},{delta_y:+d})"
+            f"logical_delta=({target_x-current_x:+d},{target_y-current_y:+d})"
         )
         sys.stdout.flush()
-        if not self._move_both_signed_and_wait(
-                delta_x, delta_y, timeout_ms=300000):
+        if not self._move_both_logical_and_wait(
+                target_x, target_y, timeout_ms=300000):
             return False
         self._sync_absolute_steps()
         reached = (self._steps_x_abs == target_x
@@ -1103,31 +1248,14 @@ QGroupBox::title {
         return reached
 
     def _move_to_step_target(self, row: int, target_x: int, target_y: int,
-                             target_kind: str, approach_from=None) -> bool:
-        """Reach a target through its recorded final-approach waypoint."""
+                             target_kind: str) -> bool:
+        """Reach a logical target using worker-owned backlash compensation."""
         if self.motorX.is_busy() or self.motorY.is_busy():
             QMessageBox.warning(self, "Motor Meşgul", "Motor hareketi devam ediyor.")
             return False
-        target_x, target_y = int(target_x), int(target_y)
-        if approach_from is not None:
-            from_x, from_y = map(int, approach_from)
-            print(
-                f"[recorded-approach-{target_kind}] row={row} "
-                f"from=({from_x},{from_y}) target=({target_x},{target_y}) "
-                f"final_delta=({target_x-from_x:+d},{target_y-from_y:+d})"
-            )
-            sys.stdout.flush()
-            if ((from_x, from_y) != (target_x, target_y)
-                    and not self._move_to_absolute_target(
-                        row, from_x, from_y, f"{target_kind}-approach-from")):
-                return False
-
-        reached = self._move_to_absolute_target(
-            row, target_x, target_y, target_kind
+        return self._move_to_absolute_target(
+            row, int(target_x), int(target_y), target_kind
         )
-        if reached:
-            self._reset_manual_approach_tracking()
-        return reached
 
     def _goto_angle_row(self, row: int, wait_s: float = 0.0) -> bool:
         """
@@ -1151,10 +1279,8 @@ QGroupBox::title {
         # --- HAREKETTEN ÖNCE: log satırını temizle ---
         self._clear_log_target()
 
-        approach_from = self._row_approach_from(row)
         if not self._move_to_step_target(
-                row, target[0], target[1], "stored",
-                approach_from=approach_from):
+                row, target[0], target[1], "stored"):
             QMessageBox.critical(self, "Tarama Hatası",
                                  f"Row {row} konumuna hareket tamamlanamadı.")
             return False
@@ -1173,12 +1299,18 @@ QGroupBox::title {
 
     # ---------- Seçim ve adım sayacı ----------
     def _sync_absolute_steps(self):
-        """Read exact signed pulse counters directly from both workers."""
-        self._steps_x_abs = int(self.motorX.position_steps())
-        self._steps_y_abs = int(self.motorY.position_steps())
+        """Read exact logical load coordinates directly from both workers."""
+        x_steps = self.motorX.logical_position_steps()
+        y_steps = self.motorY.logical_position_steps()
+        if x_steps is None or y_steps is None:
+            raise RuntimeError("backlash state is not initialized")
+        self._steps_x_abs = int(x_steps)
+        self._steps_y_abs = int(y_steps)
 
     def _position_capture_ready(self, title: str) -> bool:
         """Capture only after manual stop is processed and counters are stable."""
+        if not self._require_backlash_ready(title):
+            return False
         active = [
             axis for axis, direction in self._manual_continuous_axis.items()
             if direction is not None
@@ -1214,8 +1346,8 @@ QGroupBox::title {
         stable_for_s = 0.150
         stable_since = time.monotonic()
         snapshot = (
-            int(self.motorX.position_steps()),
-            int(self.motorY.position_steps()),
+            int(self.motorX.logical_position_steps()),
+            int(self.motorY.logical_position_steps()),
         )
         stable_deadline = time.monotonic() + 2.0
         while time.monotonic() < stable_deadline:
@@ -1226,8 +1358,8 @@ QGroupBox::title {
             if self.motorX.is_busy() or self.motorY.is_busy():
                 stable_since = time.monotonic()
             current = (
-                int(self.motorX.position_steps()),
-                int(self.motorY.position_steps()),
+                int(self.motorX.logical_position_steps()),
+                int(self.motorY.logical_position_steps()),
             )
             if current != snapshot:
                 snapshot = current
@@ -1237,9 +1369,9 @@ QGroupBox::title {
                 self._steps_x_abs, self._steps_y_abs = snapshot
                 print(
                     f"[position-capture] title={title!r} stable_ms=150 "
-                    f"absolute={snapshot} approach="
-                    f"({self._last_manual_approach['x']},"
-                    f"{self._last_manual_approach['y']})"
+                    f"logical={snapshot} last_direction="
+                    f"({self._last_manual_direction['x']},"
+                    f"{self._last_manual_direction['y']})"
                 )
                 sys.stdout.flush()
                 return True
@@ -1279,8 +1411,6 @@ QGroupBox::title {
         # O anki D'yi yakala
         self._first_distance = measurement[0]
         self._seq_first_steps = (self._steps_x_abs, self._steps_y_abs)
-        self._seq_first_approach_steps = self._manual_approach_waypoint()
-        self._reset_manual_approach_tracking()
 
     def on_select_last_clicked(self):
         if self._scan_sequence_active:
@@ -1300,8 +1430,6 @@ QGroupBox::title {
         # O anki D'yi yakala
         self._last_distance_at_select = measurement[0]
         self._seq_last_steps = (self._steps_x_abs, self._steps_y_abs)
-        self._seq_last_approach_steps = self._manual_approach_waypoint()
-        self._reset_manual_approach_tracking()
 
     def _update_sequential_total(self, *_):
         total = int(self.ui.countSpin.value()) + 1
@@ -1328,7 +1456,6 @@ QGroupBox::title {
 
     def _reset_area_selection(self):
         self._area_corners.clear()
-        self._pending_area_approach.clear()
         self.label.area_points.clear()
         labels = {
             "A": "A - Top Left",
@@ -1358,8 +1485,6 @@ QGroupBox::title {
             return
         if corner == "A":
             self._reset_area_selection()
-        self._pending_area_approach[corner] = self._manual_approach_waypoint()
-        self._reset_manual_approach_tracking()
         self._track_steps = False
         self.label.first_point = None
         self.label.last_point = None
@@ -1399,9 +1524,6 @@ QGroupBox::title {
             "steps_y": int(self._steps_y_abs),
             "distance": measurement[0],
             "unit": measurement[1],
-            "approach_from": self._pending_area_approach.pop(
-                corner, (int(self._steps_x_abs), int(self._steps_y_abs))
-            ),
         }
         self._area_button(corner).setText(f"{corner} Selected")
         self._planner_result = None
@@ -1436,6 +1558,8 @@ QGroupBox::title {
         """Build a D-origin serpentine grid and publish it to the common planner."""
         if self._scan_sequence_active or self._programmatic_motion_active:
             return
+        if not self._require_backlash_ready("Area Scan"):
+            return
         self._scan_cancel_requested = False
         missing = [name for name in ("A", "B", "C", "D")
                    if name not in self._area_corners]
@@ -1466,7 +1590,7 @@ QGroupBox::title {
             return
 
         # Normal seçim A→B→C→D şeklindedir ve tarama D'den başlar. D'ye
-        # sonradan dönmek güvenlidir; kaydedilen yaklaşma başlangıcı da planda
+        # sonradan dönmek güvenlidir; logical hedefler planda
         # tutulduğu için oluşturma anında motorun D üzerinde olması gerekmez.
         d_corner = self._area_corners["D"]
 
@@ -1521,27 +1645,6 @@ QGroupBox::title {
         x_segments = int(self.ui.areaXDiv.value())
         y_segments = int(self.ui.areaYDiv.value())
 
-        corner_indices = {
-            (0, 0): "D",
-            (x_segments, 0): "C",
-            (0, y_segments): "A",
-            (x_segments, y_segments): "B",
-        }
-        approach_overrides = {}
-        for row, grid_index in enumerate(grid_indices):
-            corner = corner_indices.get(tuple(grid_index))
-            if corner is not None:
-                approach_overrides[row] = self._area_corners[corner][
-                    "approach_from"
-                ]
-        approach_x_steps, approach_y_steps = recorded_approach_sources(
-            target_x_steps, target_y_steps,
-            d_corner["approach_from"][0], d_corner["approach_from"][1],
-            overrides=approach_overrides,
-        )
-        result["approach_from_x_steps"] = approach_x_steps
-        result["approach_from_y_steps"] = approach_y_steps
-
         self.table.setRowCount(0)
         self.label.markers.clear()
         pixels = {name: self._area_corners[name]["pixel"]
@@ -1554,7 +1657,6 @@ QGroupBox::title {
             self._set_step_target_data(
                 pitch_item, yaw_item,
                 target_x_steps[row], target_y_steps[row],
-                approach_x_steps[row], approach_y_steps[row],
             )
             self.table.insertRow(row)
             self.table.setItem(row, 0, pitch_item)
@@ -1599,7 +1701,9 @@ QGroupBox::title {
             return
         # Worker owns the authoritative pulse counter. Reading it here keeps
         # delayed/batched Qt signals from making the UI-side position drift.
-        self._steps_x_abs = int(self.motorX.position_steps())
+        logical_steps = self.motorX.logical_position_steps()
+        if logical_steps is not None:
+            self._steps_x_abs = int(logical_steps)
 
         if not self._track_steps:
             return
@@ -1616,7 +1720,9 @@ QGroupBox::title {
         steps = int(delta)
         if steps == 0:
             return
-        self._steps_y_abs = int(self.motorY.position_steps())
+        logical_steps = self.motorY.logical_position_steps()
+        if logical_steps is not None:
+            self._steps_y_abs = int(logical_steps)
 
         if not self._track_steps:
             return
@@ -1667,7 +1773,6 @@ QGroupBox::title {
         # Mevcut mutlak step değerleri
         sx = self._steps_x_abs   # MotorX → Yaw
         sy = self._steps_y_abs   # MotorY → Pitch
-        approach_from = self._manual_approach_waypoint()
 
         angle_rows = self._get_angle_rows()
         if not angle_rows and table.rowCount() > 0:
@@ -1726,21 +1831,15 @@ QGroupBox::title {
         # Bu satırın "açı satırı" olduğunu işaretle
         pitch_item.setData(Qt.UserRole, "stored_angle")
         yaw_item.setData(Qt.UserRole, "stored_angle")
-        self._set_step_target_data(
-            pitch_item, yaw_item, sx, sy,
-            approach_from[0], approach_from[1],
-        )
+        self._set_step_target_data(pitch_item, yaw_item, sx, sy)
 
         table.setItem(row, 0, pitch_item)
         table.setItem(row, 1, yaw_item)
         print(
-            f"[store-point] row={row} absolute=({sx},{sy}) "
-            f"relative=({sx - self._origin_steps_x},{sy - self._origin_steps_y}) "
-            f"approach_from=({approach_from[0]},{approach_from[1]}) "
-            f"approach_delta=({sx-approach_from[0]:+d},{sy-approach_from[1]:+d})"
+            f"[store-point] row={row} logical=({sx},{sy}) "
+            f"relative=({sx - self._origin_steps_x},{sy - self._origin_steps_y})"
         )
         sys.stdout.flush()
-        self._reset_manual_approach_tracking()
 
         # Silme butonu ekle (3. sütun)
         btn = self._make_delete_btn(framed=True)
@@ -1956,6 +2055,8 @@ QGroupBox::title {
         """
         if self._scan_sequence_active:
             return
+        if not self._require_backlash_ready("Sequential Scan"):
+            return
         self._scan_cancel_requested = False
         if not self.label.pixmap():
             return
@@ -2090,17 +2191,6 @@ QGroupBox::title {
         )
         result["target_x_steps"] = target_x_steps
         result["target_y_steps"] = target_y_steps
-        first_approach = (
-            self._seq_first_approach_steps
-            if self._seq_first_approach_steps is not None
-            else self._seq_first_steps
-        )
-        approach_x_steps, approach_y_steps = recorded_approach_sources(
-            target_x_steps, target_y_steps,
-            first_approach[0], first_approach[1],
-        )
-        result["approach_from_x_steps"] = approach_x_steps
-        result["approach_from_y_steps"] = approach_y_steps
         result["scan_step"] = 1
 
         # Fotoğraf marker'ları piksel konumlarını ayrı listede tutar. Tabloda
@@ -2113,7 +2203,6 @@ QGroupBox::title {
             self._set_step_target_data(
                 pitch_item, yaw_item,
                 target_x_steps[row], target_y_steps[row],
-                approach_x_steps[row], approach_y_steps[row],
             )
             self.table.setItem(row, 0, pitch_item)
             self.table.setItem(row, 1, yaw_item)
@@ -2147,6 +2236,8 @@ QGroupBox::title {
         """Aktif planın tarama yönündeki bir sonraki bilinen hedefe git."""
         if self._scan_sequence_active:
             return
+        if not self._require_backlash_ready("Automatic Scan"):
+            return
         self._scan_cancel_requested = False
         angle_rows = self._get_angle_rows()
 
@@ -2161,7 +2252,7 @@ QGroupBox::title {
                 row = angle_rows[current_index + 1]
             else:
                 # Bilinmeyen konumda veya serinin sonunda Next Point yeni
-                # çevrimi ilk noktadan ve onun kayıtlı yaklaşımından başlatır.
+                # çevrimi backlash-telafili ilk logical hedeften başlatır.
                 row = angle_rows[0]
             print(f"[NextPoint-angle] current={self._current_point_row} target={row}")
             sys.stdout.flush()
@@ -2186,12 +2277,6 @@ QGroupBox::title {
         yaw_d = list(self._planner_result.get("yaw_steps_delta", []))
         target_x_steps = list(self._planner_result.get("target_x_steps", []))
         target_y_steps = list(self._planner_result.get("target_y_steps", []))
-        approach_x_steps = list(
-            self._planner_result.get("approach_from_x_steps", [])
-        )
-        approach_y_steps = list(
-            self._planner_result.get("approach_from_y_steps", [])
-        )
         dpy = list(self._planner_result.get("dpy", []))
         plan_type = str(self._planner_result.get("plan_type", "sequential"))
         scan_step = int(self._planner_result.get("scan_step", -1))
@@ -2207,9 +2292,7 @@ QGroupBox::title {
             QMessageBox.critical(self, "Hata", "Planner hedef açı listesi uyumsuz.")
             return
         if (len(target_x_steps) != len(dpy)
-                or len(target_y_steps) != len(dpy)
-                or len(approach_x_steps) != len(dpy)
-                or len(approach_y_steps) != len(dpy)):
+                or len(target_y_steps) != len(dpy)):
             QMessageBox.critical(self, "Hata", "Kesin step hedef listesi uyumsuz.")
             return
 
@@ -2223,9 +2306,7 @@ QGroupBox::title {
         self._clear_log_target()
         if not self._move_to_step_target(
                 target_row, target_x_steps[target_row],
-                target_y_steps[target_row], plan_type,
-                approach_from=(approach_x_steps[target_row],
-                               approach_y_steps[target_row])):
+                target_y_steps[target_row], plan_type):
             self._mark_position_unknown()
             if not self._scan_cancel_requested:
                 QMessageBox.critical(
@@ -2248,6 +2329,8 @@ QGroupBox::title {
         """
         if self._scan_sequence_active:
             return
+        if not self._require_backlash_ready("Automatic Scan"):
+            return
         self._scan_cancel_requested = False
         angle_rows = self._get_angle_rows()
 
@@ -2269,7 +2352,7 @@ QGroupBox::title {
             print("\n=== AÇISAL SCAN BAŞLIYOR (pvStorePoint noktaları) ===")
             print(
                 f"Nokta: {len(scan_rows)}, yön=First→Last, "
-                f"kayıtlı yaklaşım etkin, interval={wait_s:.3f} s"
+                f"backlash telafisi etkin, interval={wait_s:.3f} s"
             )
             sys.stdout.flush()
 
@@ -2315,12 +2398,6 @@ QGroupBox::title {
             yaw_d = list(self._planner_result.get("yaw_steps_delta", []))
             target_x_steps = list(self._planner_result.get("target_x_steps", []))
             target_y_steps = list(self._planner_result.get("target_y_steps", []))
-            approach_x_steps = list(
-                self._planner_result.get("approach_from_x_steps", [])
-            )
-            approach_y_steps = list(
-                self._planner_result.get("approach_from_y_steps", [])
-            )
             dpy = list(self._planner_result.get("dpy", []))
             plan_type = str(self._planner_result.get("plan_type", "sequential"))
             scan_step = int(self._planner_result.get("scan_step", -1))
@@ -2333,16 +2410,14 @@ QGroupBox::title {
             if len(dpy) != total_seg + 1:
                 raise RuntimeError("Planner hedef açı listesi uyumsuz.")
             if (len(target_x_steps) != len(dpy)
-                    or len(target_y_steps) != len(dpy)
-                    or len(approach_x_steps) != len(dpy)
-                    or len(approach_y_steps) != len(dpy)):
+                    or len(target_y_steps) != len(dpy)):
                 raise RuntimeError("Kesin step hedef listesi uyumsuz.")
 
             if self.motorX.is_busy() or self.motorY.is_busy():
                 raise RuntimeError("Motor hareketi devam ediyor.")
             self._scan_sequence_active = True
 
-            direction_text = "First→Last (kayıtlı yaklaşım)"
+            direction_text = "First→Last (backlash compensation)"
             print(f"\n=== {plan_type.upper()} TARAMA BAŞLIYOR ({direction_text}) ===")
             print(f"Başlangıç satırı: 0, bitiş satırı: {total_seg}")
             sys.stdout.flush()
@@ -2351,9 +2426,7 @@ QGroupBox::title {
                 self._clear_log_target()
                 if not self._move_to_step_target(
                         target_row, target_x_steps[target_row],
-                        target_y_steps[target_row], plan_type,
-                        approach_from=(approach_x_steps[target_row],
-                                       approach_y_steps[target_row])):
+                        target_y_steps[target_row], plan_type):
                     if self._scan_cancel_requested:
                         self._scan_sequence_active = False
                         self._clear_log_target()
@@ -2389,11 +2462,18 @@ QGroupBox::title {
                 QMessageBox.critical(self, "Tarama Hatası", str(e))
 
     # ---------- Hareket / zaman yardımcıları ----------
-    def _move_both_signed_and_wait(self, x_steps: int, y_steps: int,
-                                   timeout_ms: int = 120000) -> bool:
+    def _move_both_logical_and_wait(self, target_x: int, target_y: int,
+                                    timeout_ms: int = 120000) -> bool:
         """İki hareket kimliğinin de başarıyla tamamlanmasını bekle."""
         if self._programmatic_motion_active:
             return False
+        # Only uninterrupted manual travel may establish a preload flank.
+        # Automatic movement invalidates any earlier manual preload evidence.
+        self._last_manual_direction = {"x": None, "y": None}
+        self._manual_preload_start_raw = {
+            "x": int(self.motorX.position_steps()),
+            "y": int(self.motorY.position_steps()),
+        }
         self._programmatic_motion_active = True
         x_results = {}
         y_results = {}
@@ -2407,8 +2487,8 @@ QGroupBox::title {
         self.motorX.moveFinished.connect(on_x_finished)
         self.motorY.moveFinished.connect(on_y_finished)
         try:
-            x_id = self.motorX.move_signed_steps(int(x_steps))
-            y_id = self.motorY.move_signed_steps(int(y_steps))
+            x_id = self.motorX.move_to_logical_position(int(target_x))
+            y_id = self.motorY.move_to_logical_position(int(target_y))
 
             if x_id == 0:
                 x_results[0] = True

@@ -14,6 +14,8 @@ from typing import Optional
 import gpiod
 from PySide2.QtCore import QObject, QThread, Signal, Slot, QEventLoop, QTimer
 
+from backlash import BacklashAxisState
+
 
 class _Chip:
     """Singleton holder for gpiochip0."""
@@ -105,7 +107,14 @@ class StepperWorker(QObject):
     pulsePhaseReport = Signal(int, float, float, float, float)
     # samples, min HIGH ms, max HIGH ms, min LOW ms, max LOW ms
 
-    def __init__(self, pins: MotorPins, shared: Optional[SharedPins] = None, parent=None):
+    def __init__(
+        self,
+        pins: MotorPins,
+        shared: Optional[SharedPins] = None,
+        parent=None,
+        *,
+        backlash_steps: int = 0,
+    ):
         super().__init__(parent)
         self.pins = pins
         self.shared = shared
@@ -125,6 +134,7 @@ class StepperWorker(QObject):
         self._run = True
         self._total = 0
         self._position_steps = 0
+        self._backlash_state = BacklashAxisState(backlash_steps)
         self._busy = False
         self._next_move_id = 1
         self._timing_count = 0
@@ -184,6 +194,8 @@ class StepperWorker(QObject):
         self._total += 1
         with self._state_lock:
             self._position_steps += delta
+            if self._backlash_state.initialized:
+                self._backlash_state.apply_pulses(delta)
         self._pending_step_delta += delta
         self._emit_step_update()
         # LOW has its own deadline. Scheduler overrun during HIGH must never
@@ -299,6 +311,57 @@ class StepperWorker(QObject):
             self._condition.notify()
         return move_id
 
+    def submit_logical_target(self, target_position_steps: int) -> int:
+        """Atomically plan and queue a backlash-compensated logical target.
+
+        Logical targets are accepted only while the axis is idle. The state is
+        not advanced here; each pulse updates it in ``_pulse_once`` so a
+        cancelled move retains the correct partial backlash position.
+        """
+        target_position_steps = int(target_position_steps)
+        with self._condition:
+            with self._state_lock:
+                if self._busy:
+                    raise RuntimeError(
+                        "logical target cannot be queued while the axis is busy"
+                    )
+                signed_steps = self._backlash_state.pulses_to_target(
+                    target_position_steps
+                )
+            if signed_steps == 0:
+                return 0
+            move_id = self._next_move_id
+            self._next_move_id += 1
+            self._commands.append(("move", (move_id, signed_steps)))
+            self._set_busy(True)
+            self._condition.notify()
+        return move_id
+
+    def initialize_backlash(
+        self, loaded_direction: int, logical_position_steps: int = 0
+    ):
+        """Set a known loaded flank without moving hardware."""
+        # Match movement submission's condition -> state lock order so an
+        # initialization cannot race a newly queued manual/automatic move.
+        with self._condition:
+            with self._state_lock:
+                if self._busy:
+                    raise RuntimeError(
+                        "backlash cannot be initialized while the axis is busy"
+                    )
+                self._backlash_state.initialize(
+                    loaded_direction, logical_position_steps
+                )
+                return self._backlash_state.snapshot()
+
+    def invalidate_backlash(self):
+        with self._state_lock:
+            self._backlash_state.invalidate()
+
+    def backlash_snapshot(self):
+        with self._state_lock:
+            return self._backlash_state.snapshot()
+
     def start_continuous(self, direction: int):
         """Start a worker-timed manual move; direction must be -1 or +1."""
         direction = 1 if int(direction) > 0 else -1
@@ -372,6 +435,7 @@ class StepperWorker(QObject):
                 self._stop_continuous_in_worker()
                 self._cancel_moves_in_worker()
             elif name == "reset":
+                self.invalidate_backlash()
                 if self.shared:
                     self.shared.pulse_reset()
                 else:
@@ -380,10 +444,13 @@ class StepperWorker(QObject):
                 if self.shared:
                     self.shared.set_sleep(not bool(args[0]))
                 if args[0]:
+                    self.invalidate_backlash()
                     self._stop_continuous_in_worker()
                     self._cancel_moves_in_worker()
             elif name == "enable":
                 self._enable(bool(args[0]))
+                if not args[0]:
+                    self.invalidate_backlash()
             elif name == "shutdown":
                 self._stop_continuous_in_worker()
                 self._cancel_moves_in_worker()
@@ -489,6 +556,11 @@ class StepperWorker(QObject):
         with self._state_lock:
             return int(self._position_steps)
 
+    def logical_position_steps(self):
+        """Return logical load position, or None until backlash is initialized."""
+        with self._state_lock:
+            return self._backlash_state.logical_position_steps
+
 
 class MotorController(QObject):
     """Public controller; all GPIO work is delegated to StepperWorker."""
@@ -501,9 +573,18 @@ class MotorController(QObject):
     timingReport = Signal(int, float, float)
     pulsePhaseReport = Signal(int, float, float, float, float)
 
-    def __init__(self, pins: MotorPins, shared: Optional[SharedPins] = None, parent=None):
+    def __init__(
+        self,
+        pins: MotorPins,
+        shared: Optional[SharedPins] = None,
+        parent=None,
+        *,
+        backlash_steps: int = 0,
+    ):
         super().__init__(parent)
-        self.worker = StepperWorker(pins, shared=shared)
+        self.worker = StepperWorker(
+            pins, shared=shared, backlash_steps=backlash_steps
+        )
         self.th = QThread()
         self.worker.moveToThread(self.th)
 
@@ -533,6 +614,22 @@ class MotorController(QObject):
         """Preferred atomic movement API."""
         return self.worker.submit_move(int(signed_steps))
 
+    def move_to_logical_position(self, target_position_steps: int) -> int:
+        return self.worker.submit_logical_target(int(target_position_steps))
+
+    def initialize_backlash(
+        self, loaded_direction: int, logical_position_steps: int = 0
+    ):
+        return self.worker.initialize_backlash(
+            int(loaded_direction), int(logical_position_steps)
+        )
+
+    def invalidate_backlash(self):
+        self.worker.invalidate_backlash()
+
+    def backlash_snapshot(self):
+        return self.worker.backlash_snapshot()
+
     def start_continuous(self, direction: int):
         self.worker.start_continuous(direction)
 
@@ -556,6 +653,9 @@ class MotorController(QObject):
 
     def position_steps(self) -> int:
         return self.worker.position_steps()
+
+    def logical_position_steps(self):
+        return self.worker.logical_position_steps()
 
     def wait_until_idle(self, timeout_ms: int = 8000) -> bool:
         if not self.is_busy():
