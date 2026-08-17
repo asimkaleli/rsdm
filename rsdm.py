@@ -35,7 +35,7 @@ from laser_gpio import LaserGPIO
 from orientation import OrientationWorker
 from motor_control import MotorController, MotorPins, SharedPins
 from motor_trace import MotorTraceLogger
-from backlash import DEFAULT_BACKLASH_STEPS
+from backlash import DEFAULT_BACKLASH_STEPS, final_approach_source
 
 # Yalnızca planlayıcıyı kullanacağız (fallback yok)
 from laser_path_planner import (
@@ -47,6 +47,8 @@ from datetime import datetime
 T = TypeVar("T")
 TARGET_X_STEPS_ROLE = Qt.UserRole + 1
 TARGET_Y_STEPS_ROLE = Qt.UserRole + 2
+APPROACH_X_DIRECTION_ROLE = Qt.UserRole + 3
+APPROACH_Y_DIRECTION_ROLE = Qt.UserRole + 4
 
 class rsdm(QWidget):
     # ----------- KALİBRASYON (kendine göre güncelle) -----------
@@ -63,6 +65,7 @@ class rsdm(QWidget):
     DISTANCE_MIN_FRESHNESS_S = 2.0
     BACKLASH_X_STEPS = DEFAULT_BACKLASH_STEPS["x"]
     BACKLASH_Y_STEPS = DEFAULT_BACKLASH_STEPS["y"]
+    FINAL_APPROACH_MARGIN_STEPS = 10
 
     def __init__(self):
         super(rsdm, self).__init__()
@@ -1226,6 +1229,15 @@ QGroupBox::title {
             item.setData(TARGET_X_STEPS_ROLE, int(x_steps))
             item.setData(TARGET_Y_STEPS_ROLE, int(y_steps))
 
+    @staticmethod
+    def _set_approach_direction_data(
+        pitch_item, yaw_item, x_direction: int, y_direction: int
+    ):
+        """Attach the loaded flank used while manually saving a point."""
+        for item in (pitch_item, yaw_item):
+            item.setData(APPROACH_X_DIRECTION_ROLE, int(x_direction))
+            item.setData(APPROACH_Y_DIRECTION_ROLE, int(y_direction))
+
     def _row_step_target(self, row: int):
         item = self.ui.table.item(row, 0)
         if item is None:
@@ -1235,6 +1247,31 @@ QGroupBox::title {
         if x_steps is None or y_steps is None:
             return None
         return int(x_steps), int(y_steps)
+
+    def _row_approach_directions(self, row: int):
+        item = self.ui.table.item(row, 0)
+        if item is None:
+            return None
+        x_direction = item.data(APPROACH_X_DIRECTION_ROLE)
+        y_direction = item.data(APPROACH_Y_DIRECTION_ROLE)
+        if x_direction is None or y_direction is None:
+            return None
+        x_direction, y_direction = int(x_direction), int(y_direction)
+        if x_direction not in (-1, 1) or y_direction not in (-1, 1):
+            return None
+        return x_direction, y_direction
+
+    @staticmethod
+    def _snapshot_loaded_direction(snapshot, fallback=None):
+        """Resolve the flank at capture time; fall back to the last jog."""
+        if snapshot.initialized:
+            if snapshot.gap_steps == 0:
+                return -1
+            if snapshot.gap_steps == snapshot.backlash_steps:
+                return 1
+        if fallback in (-1, 1):
+            return int(fallback)
+        return None
 
     def _trace_motor_state(self, axis: str, event: str, **values):
         """Add a GUI-level target/save marker to the motor pulse trace."""
@@ -1252,8 +1289,10 @@ QGroupBox::title {
             **values,
         )
 
-    def _move_to_absolute_target(self, row: int, target_x: int, target_y: int,
-                                 target_kind: str) -> bool:
+    def _move_to_absolute_target(
+        self, row: int, target_x: int, target_y: int, target_kind: str,
+        approach_directions=None,
+    ) -> bool:
         """Move directly to one backlash-compensated logical target."""
         if not self._require_backlash_ready("Motor Target"):
             return False
@@ -1282,6 +1321,61 @@ QGroupBox::title {
             f"{before_y.gap_steps}/{before_y.backlash_steps})"
         )
         sys.stdout.flush()
+
+        if approach_directions is not None:
+            x_direction, y_direction = approach_directions
+            pre_x = final_approach_source(
+                target_x, x_direction, self.BACKLASH_X_STEPS,
+                self.FINAL_APPROACH_MARGIN_STEPS,
+            )
+            pre_y = final_approach_source(
+                target_y, y_direction, self.BACKLASH_Y_STEPS,
+                self.FINAL_APPROACH_MARGIN_STEPS,
+            )
+            print(
+                f"[recorded-approach-{target_kind}] row={row} "
+                f"directions=({x_direction:+d},{y_direction:+d}) "
+                f"pretarget=({pre_x},{pre_y}) final=({target_x},{target_y})"
+            )
+            sys.stdout.flush()
+            self._trace_motor_state(
+                "x", "approach_source_start", row=row,
+                target_kind=target_kind,
+                target_position_steps=pre_x,
+                direction=x_direction,
+            )
+            self._trace_motor_state(
+                "y", "approach_source_start", row=row,
+                target_kind=target_kind,
+                target_position_steps=pre_y,
+                direction=y_direction,
+            )
+            if not self._move_both_logical_and_wait(
+                    pre_x, pre_y, timeout_ms=300000):
+                self._trace_motor_state(
+                    "x", "target_abort", row=row, target_kind=target_kind,
+                    target_position_steps=target_x,
+                    message="approach_source_failed",
+                )
+                self._trace_motor_state(
+                    "y", "target_abort", row=row, target_kind=target_kind,
+                    target_position_steps=target_y,
+                    message="approach_source_failed",
+                )
+                return False
+            self._trace_motor_state(
+                "x", "approach_source_finish", row=row,
+                target_kind=target_kind,
+                target_position_steps=pre_x,
+                direction=x_direction,
+            )
+            self._trace_motor_state(
+                "y", "approach_source_finish", row=row,
+                target_kind=target_kind,
+                target_position_steps=pre_y,
+                direction=y_direction,
+            )
+
         if not self._move_both_logical_and_wait(
                 target_x, target_y, timeout_ms=300000):
             self._trace_motor_state(
@@ -1322,14 +1416,17 @@ QGroupBox::title {
             self._mark_position_unknown()
         return reached
 
-    def _move_to_step_target(self, row: int, target_x: int, target_y: int,
-                             target_kind: str) -> bool:
+    def _move_to_step_target(
+        self, row: int, target_x: int, target_y: int, target_kind: str,
+        approach_directions=None,
+    ) -> bool:
         """Reach a logical target using worker-owned backlash compensation."""
         if self.motorX.is_busy() or self.motorY.is_busy():
             QMessageBox.warning(self, "Motor Meşgul", "Motor hareketi devam ediyor.")
             return False
         return self._move_to_absolute_target(
-            row, int(target_x), int(target_y), target_kind
+            row, int(target_x), int(target_y), target_kind,
+            approach_directions=approach_directions,
         )
 
     def _goto_angle_row(self, row: int, wait_s: float = 0.0) -> bool:
@@ -1355,7 +1452,8 @@ QGroupBox::title {
         self._clear_log_target()
 
         if not self._move_to_step_target(
-                row, target[0], target[1], "stored"):
+                row, target[0], target[1], "stored",
+                approach_directions=self._row_approach_directions(row)):
             QMessageBox.critical(self, "Tarama Hatası",
                                  f"Row {row} konumuna hareket tamamlanamadı.")
             return False
@@ -1849,6 +1947,28 @@ QGroupBox::title {
         sx = self._steps_x_abs   # MotorX → Yaw
         sy = self._steps_y_abs   # MotorY → Pitch
 
+        x_fallback = self._last_manual_direction.get("x")
+        y_fallback = self._last_manual_direction.get("y")
+        if x_fallback is not None:
+            x_fallback = self._manual_direction_sign("x", x_fallback)
+        if y_fallback is not None:
+            y_fallback = self._manual_direction_sign("y", y_fallback)
+        x_approach_direction = self._snapshot_loaded_direction(
+            self.motorX.backlash_snapshot(), x_fallback
+        )
+        y_approach_direction = self._snapshot_loaded_direction(
+            self.motorY.backlash_snapshot(), y_fallback
+        )
+        if x_approach_direction is None or y_approach_direction is None:
+            QMessageBox.warning(
+                self,
+                "Store Point",
+                "Noktanin son yaklasma yonu belirlenemedi. "
+                "Noktayi kaydetmeden once iki ekseni de son yaklasma "
+                "yonlerinde hareket ettirin.",
+            )
+            return
+
         angle_rows = self._get_angle_rows()
         if not angle_rows and table.rowCount() > 0:
             # Sequential/Area hedefleri ile Store Point satırlarını aynı
@@ -1907,6 +2027,10 @@ QGroupBox::title {
         pitch_item.setData(Qt.UserRole, "stored_angle")
         yaw_item.setData(Qt.UserRole, "stored_angle")
         self._set_step_target_data(pitch_item, yaw_item, sx, sy)
+        self._set_approach_direction_data(
+            pitch_item, yaw_item,
+            x_approach_direction, y_approach_direction,
+        )
 
         table.setItem(row, 0, pitch_item)
         table.setItem(row, 1, yaw_item)
@@ -1917,11 +2041,11 @@ QGroupBox::title {
         sys.stdout.flush()
         self._trace_motor_state(
             "x", "point_saved", row=row, target_kind="stored",
-            target_position_steps=sx,
+            target_position_steps=sx, direction=x_approach_direction,
         )
         self._trace_motor_state(
             "y", "point_saved", row=row, target_kind="stored",
-            target_position_steps=sy,
+            target_position_steps=sy, direction=y_approach_direction,
         )
 
         # Silme butonu ekle (3. sütun)

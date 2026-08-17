@@ -1,11 +1,36 @@
 import unittest
 
-from backlash import BacklashAxisState, DEFAULT_BACKLASH_STEPS
+from backlash import (
+    BacklashAxisState,
+    DEFAULT_BACKLASH_STEPS,
+    final_approach_source,
+)
 
 
 class BacklashAxisStateTests(unittest.TestCase):
     def test_project_calibration_values(self):
         self.assertEqual(DEFAULT_BACKLASH_STEPS, {"x": 77, "y": 4})
+
+    def test_final_approach_source_finishes_in_recorded_direction(self):
+        self.assertEqual(final_approach_source(1000, +1, 77, 10), 913)
+        self.assertEqual(final_approach_source(1000, -1, 77, 10), 1087)
+
+    def test_final_approach_source_validates_inputs(self):
+        with self.assertRaises(ValueError):
+            final_approach_source(0, 0, 77)
+        with self.assertRaises(ValueError):
+            final_approach_source(0, 1, -1)
+
+    def test_two_stage_move_ends_on_requested_flank(self):
+        for direction, expected_gap in ((-1, 0), (+1, 77)):
+            state = BacklashAxisState(77)
+            state.initialize(-direction, logical_position_steps=250)
+            source = final_approach_source(1000, direction, 77, 10)
+            state.apply_pulses(state.pulses_to_target(source))
+            state.apply_pulses(state.pulses_to_target(1000))
+
+            self.assertEqual(state.logical_position_steps, 1000)
+            self.assertEqual(state.gap_steps, expected_gap)
 
     def test_state_is_unknown_until_preloaded(self):
         state = BacklashAxisState(40)

@@ -16,6 +16,32 @@ DEFAULT_BACKLASH_STEPS = {
 }
 
 
+def final_approach_source(
+    target_position_steps: int,
+    loaded_direction: int,
+    backlash_steps: int,
+    margin_steps: int = 10,
+) -> int:
+    """Return a point beyond the target for a repeatable final approach.
+
+    Moving from this source to ``target_position_steps`` finishes in
+    ``loaded_direction``. The source distance includes the configured
+    backlash plus a small physical take-up margin.
+    """
+    target = _integer(target_position_steps, "target_position_steps")
+    direction = _integer(loaded_direction, "loaded_direction")
+    backlash = _integer(backlash_steps, "backlash_steps")
+    margin = _integer(margin_steps, "margin_steps")
+    if direction not in (-1, 1):
+        raise ValueError("loaded_direction must be -1 or +1")
+    if backlash < 0 or margin < 0:
+        raise ValueError("backlash_steps and margin_steps cannot be negative")
+    distance = backlash + margin
+    if distance <= 0:
+        return target
+    return target - direction * distance
+
+
 def _integer(value, name: str) -> int:
     try:
         return operator.index(value)
@@ -137,4 +163,3 @@ class BacklashAxisState:
         if delta < 0:
             return delta - self._gap_steps
         return 0
-
