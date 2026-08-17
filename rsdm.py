@@ -2691,8 +2691,13 @@ QGroupBox::title {
         def on_y_finished(move_id: int, completed: bool):
             y_results[int(move_id)] = bool(completed)
 
-        self.motorX.moveFinished.connect(on_x_finished)
-        self.motorY.moveFinished.connect(on_y_finished)
+        # Receive completion directly from each worker. Relaying through the
+        # GUI thread puts this notification behind queued step-update events
+        # and produced a visible pause between approach stages.
+        x_finished_signal = self.motorX.worker.moveFinished
+        y_finished_signal = self.motorY.worker.moveFinished
+        x_finished_signal.connect(on_x_finished, Qt.DirectConnection)
+        y_finished_signal.connect(on_y_finished, Qt.DirectConnection)
         try:
             x_id = self.motorX.move_to_logical_position(int(target_x))
             y_id = self.motorY.move_to_logical_position(int(target_y))
@@ -2715,11 +2720,12 @@ QGroupBox::title {
                 if x_done and y_done:
                     completed = x_results[x_id] and y_results[y_id]
                     if completed:
-                        # moveFinished is emitted just before the worker's
-                        # final busy-state update. Do not expose the next scan
-                        # target until both command queues are verifiably idle.
+                        # moveFinished precedes the worker's busy-state update
+                        # by only a few instructions. Poll that authoritative
+                        # state without adding an artificial settle pause.
                         if not self._wait_both_idle(
-                                timeout_ms=5000, settle_ms=30):
+                                timeout_ms=5000, settle_ms=0,
+                                arm_cycles=0):
                             self._mark_position_unknown()
                             return False
                         self._sync_absolute_steps()
@@ -2738,11 +2744,11 @@ QGroupBox::title {
         finally:
             self._programmatic_motion_active = False
             try:
-                self.motorX.moveFinished.disconnect(on_x_finished)
+                x_finished_signal.disconnect(on_x_finished)
             except Exception:
                 pass
             try:
-                self.motorY.moveFinished.disconnect(on_y_finished)
+                y_finished_signal.disconnect(on_y_finished)
             except Exception:
                 pass
 
@@ -2777,7 +2783,10 @@ QGroupBox::title {
         except Exception:
             return 0.0
 
-    def _wait_both_idle(self, timeout_ms: int = 120000, settle_ms: int = 30) -> bool:
+    def _wait_both_idle(
+        self, timeout_ms: int = 120000, settle_ms: int = 30,
+        arm_cycles: int = 3,
+    ) -> bool:
         """
         Her iki motorun gerçekten durmasını bekler.
         Yarış durumlarına karşı: kısa bir 'arm' gecikmesi + 'settle' yeniden doğrulaması uygular.
@@ -2785,7 +2794,7 @@ QGroupBox::title {
         t_end = time.monotonic() + timeout_ms / 1000.0
 
         # ARM: is_busy bayraklarının set olabilmesi için 2-3 event döngüsü ve ufak gecikme
-        for _ in range(3):
+        for _ in range(max(0, int(arm_cycles))):
             QApplication.processEvents()
             time.sleep(0.01)
 
