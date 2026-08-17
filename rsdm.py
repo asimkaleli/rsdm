@@ -1224,23 +1224,39 @@ QGroupBox::title {
             return False
         self._sync_absolute_steps()
         current_x, current_y = self._steps_x_abs, self._steps_y_abs
+        before_x = self.motorX.backlash_snapshot()
+        before_y = self.motorY.backlash_snapshot()
+        before_raw_x = int(self.motorX.position_steps())
+        before_raw_y = int(self.motorY.position_steps())
         target_x, target_y = int(target_x), int(target_y)
         print(
             f"[step-target-{target_kind}] row={row} "
             f"current=({current_x},{current_y}) "
             f"target=({target_x},{target_y}) "
-            f"logical_delta=({target_x-current_x:+d},{target_y-current_y:+d})"
+            f"logical_delta=({target_x-current_x:+d},{target_y-current_y:+d}) "
+            f"raw_before=({before_raw_x},{before_raw_y}) "
+            f"gap_before=({before_x.gap_steps}/{before_x.backlash_steps},"
+            f"{before_y.gap_steps}/{before_y.backlash_steps})"
         )
         sys.stdout.flush()
         if not self._move_both_logical_and_wait(
                 target_x, target_y, timeout_ms=300000):
             return False
         self._sync_absolute_steps()
+        after_x = self.motorX.backlash_snapshot()
+        after_y = self.motorY.backlash_snapshot()
+        after_raw_x = int(self.motorX.position_steps())
+        after_raw_y = int(self.motorY.position_steps())
         reached = (self._steps_x_abs == target_x
                    and self._steps_y_abs == target_y)
         print(
             f"[step-target-{target_kind}] row={row} "
-            f"reached=({self._steps_x_abs},{self._steps_y_abs}) ok={reached}"
+            f"reached=({self._steps_x_abs},{self._steps_y_abs}) "
+            f"raw_after=({after_raw_x},{after_raw_y}) "
+            f"raw_delta=({after_raw_x-before_raw_x:+d},"
+            f"{after_raw_y-before_raw_y:+d}) "
+            f"gap_after=({after_x.gap_steps}/{after_x.backlash_steps},"
+            f"{after_y.gap_steps}/{after_y.backlash_steps}) ok={reached}"
         )
         sys.stdout.flush()
         if not reached:
