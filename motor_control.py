@@ -137,6 +137,7 @@ class StepperWorker(QObject):
         self._position_steps = 0
         self._backlash_state = BacklashAxisState(backlash_steps)
         self._busy = False
+        self._diagnostics_enabled = True
         self._next_move_id = 1
         self._timing_count = 0
         self._timing_period_sum_s = 0.0
@@ -225,6 +226,8 @@ class StepperWorker(QObject):
 
     def _trace_event(self, event: str, **values):
         """Publish a lossless pulse/state record without doing file I/O here."""
+        if not self._diagnostics_enabled:
+            return
         with self._state_lock:
             snapshot = self._backlash_state.snapshot()
             record = {
@@ -252,6 +255,8 @@ class StepperWorker(QObject):
         self._phase_low_max_s = 0.0
 
     def _record_pulse_phases(self, high_s: float, low_s: float):
+        if not self._diagnostics_enabled:
+            return
         high_s = max(0.0, float(high_s))
         low_s = max(0.0, float(low_s))
         self._phase_count += 1
@@ -267,6 +272,8 @@ class StepperWorker(QObject):
         self._phase_low_max_s = max(self._phase_low_max_s, low_s)
 
     def _record_pulse_timing(self, pulse_start: float, expected_period_s: float):
+        if not self._diagnostics_enabled:
+            return
         if self._timing_last_start is not None:
             actual_period_s = pulse_start - self._timing_last_start
             expected_s = self._timing_last_expected_period_s
@@ -280,6 +287,9 @@ class StepperWorker(QObject):
         self._timing_last_expected_period_s = expected_period_s
 
     def _emit_timing_report(self):
+        if not self._diagnostics_enabled:
+            self._reset_timing()
+            return
         if self._timing_count > 0:
             mean_period_ms = 1000.0 * self._timing_period_sum_s / self._timing_count
             max_jitter_ms = 1000.0 * self._timing_max_jitter_s
@@ -295,6 +305,12 @@ class StepperWorker(QObject):
                 1000.0 * self._phase_low_max_s,
             )
         self._reset_timing()
+
+    def set_diagnostics_enabled(self, enabled: bool):
+        """Enable expensive trace and pulse timing collection."""
+        self._diagnostics_enabled = bool(enabled)
+        if not self._diagnostics_enabled:
+            self._reset_timing()
 
     def _movement_edge_s(self) -> float:
         """Use the selected fixed speed for manual and planned movements."""

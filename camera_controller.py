@@ -31,6 +31,7 @@ class CameraController:
         self.capture = None
         self.device = None
         self.is_running = False
+        self.zoom_factor = 1.0
 
         self.timer = QTimer()
         self.timer.timeout.connect(self._update_frame)
@@ -129,6 +130,14 @@ class CameraController:
             self.capture = None
         self.is_running = False
 
+    def set_zoom(self, factor):
+        """Set centered digital zoom between 1x and 4x."""
+        try:
+            factor = float(factor)
+        except (TypeError, ValueError):
+            factor = 1.0
+        self.zoom_factor = min(4.0, max(1.0, factor))
+
     def _update_frame(self):
         try:
             if self.backend == "csi":
@@ -147,6 +156,13 @@ class CameraController:
             if frame is None:
                 return
             h, w, ch = frame.shape
+            if self.zoom_factor > 1.0:
+                crop_w = max(1, int(round(w / self.zoom_factor)))
+                crop_h = max(1, int(round(h / self.zoom_factor)))
+                left = max(0, (w - crop_w) // 2)
+                top = max(0, (h - crop_h) // 2)
+                frame = frame[top:top + crop_h, left:left + crop_w]
+                h, w, ch = frame.shape
             frame = frame[..., ::-1].copy()
             qimg = QImage(frame.data, w, h, ch * w, QImage.Format_RGB888)
             self.label.setPixmap(QPixmap.fromImage(qimg))

@@ -13,6 +13,7 @@ Dimetix D-Series iş parçacığı
 """
 
 import re
+import threading
 from typing import Callable, Optional, Tuple, Iterable
 from PySide2.QtCore import QThread, Signal, Slot
 from serial import SerialException
@@ -68,6 +69,8 @@ class DimetixWorker(QThread):
 
         # distance auto-output period (ms) -> s0h+<ms>
         self._distance_period_ms = self.interval_ms
+        self._applied_distance_period_ms = None
+        self._config_lock = threading.Lock()
 
         # strength komutu (default: s0m+0)
         self._strength_cmd = (strength_cmd or "s0m+0").strip()
@@ -106,9 +109,18 @@ class DimetixWorker(QThread):
             ms = int(val)
             if ms <= 0:
                 raise ValueError
-            self._distance_period_ms = ms
+            with self._config_lock:
+                self._distance_period_ms = max(50, ms)
         except ValueError:
             self.error.emit(f"Geçersiz distance periyodu: '{cmd}'")
+
+    @Slot(int)
+    def set_interval_ms(self, interval_ms: int):
+        """Strength döngüsünün periyodunu çalışma sırasında güncelle."""
+        try:
+            self.interval_ms = max(50, int(interval_ms))
+        except (TypeError, ValueError):
+            self.error.emit(f"Geçersiz ölçüm periyodu: '{interval_ms}'")
 
     @Slot(str)
     def set_strength_command(self, cmd: str):
@@ -157,6 +169,7 @@ class DimetixWorker(QThread):
                     self.error.emit(f"Ön-komut '{c}' hata: {e}")
             # auto-distance yeniden başlatılması gerektiğini belirt
             self._auto_distance_started = False
+            self._applied_distance_period_ms = None
             return True
         return False
 
@@ -177,15 +190,21 @@ class DimetixWorker(QThread):
 
     def _start_auto_distance_if_needed(self):
         """
-        Distance modunda bir kere s0h+<ms> gönder.
+        Distance modunda s0h+<ms> gönder; periyot değiştiyse otomatik yenile.
         """
-        if self._auto_distance_started:
-            return
-
         if not self.ser:
             return
 
-        cmd = f"s0h+{int(self._distance_period_ms)}"
+        with self._config_lock:
+            requested_period_ms = int(self._distance_period_ms)
+
+        if (self._auto_distance_started
+                and self._applied_distance_period_ms == requested_period_ms):
+            return
+        if self._auto_distance_started:
+            self._stop_auto_distance_if_running()
+
+        cmd = f"s0h+{requested_period_ms}"
         try:
             ok, resp = send_cmd_open(self.ser, cmd=cmd, timeout=self._cmd_timeout)
             if not ok:
@@ -195,6 +214,7 @@ class DimetixWorker(QThread):
             if resp:
                 self.raw.emit(resp)
             self._auto_distance_started = True
+            self._applied_distance_period_ms = requested_period_ms
         except Exception as e:
             self.error.emit(f"Auto-distance komut hatası ({cmd}): {e}")
 
@@ -213,6 +233,7 @@ class DimetixWorker(QThread):
             self.error.emit(f"Auto-distance durdurma hatası (s0c): {e}")
         finally:
             self._auto_distance_started = False
+            self._applied_distance_period_ms = None
 
     def stop_auto_distance(self):
         self._stop_auto_distance_if_running()

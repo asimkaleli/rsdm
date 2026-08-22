@@ -53,6 +53,35 @@ class ClickableLabel(QLabel):
         self.markers = [m for m in self.markers if m[0] != row_index]
         self.update()
 
+    def rescale_points_for_zoom(self, old_zoom, new_zoom):
+        """Keep overlay points aligned when centered digital zoom changes."""
+        try:
+            ratio = float(new_zoom) / float(old_zoom)
+        except (TypeError, ValueError, ZeroDivisionError):
+            return
+        cx = self.width() / 2.0
+        cy = self.height() / 2.0
+
+        def transform(point):
+            if point is None:
+                return None
+            x, y = point
+            return (
+                int(round(cx + (x - cx) * ratio)),
+                int(round(cy + (y - cy) * ratio)),
+            )
+
+        self.markers = [
+            (row, *transform((x, y))) for row, x, y in self.markers
+        ]
+        self.first_point = transform(self.first_point)
+        self.last_point = transform(self.last_point)
+        self.area_points = {
+            corner: transform(point)
+            for corner, point in self.area_points.items()
+        }
+        self.update()
+
     def paintEvent(self, event):
         super().paintEvent(event)
         p = QPainter(self)
