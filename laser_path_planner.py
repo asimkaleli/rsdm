@@ -278,7 +278,7 @@ def plan_grid_path(
     (bottom-right) and ``D`` (bottom-left).  Each value is
     ``(distance, pitch_deg, yaw_deg)`` in the laser coordinate system.
 
-    The returned path starts at D.  Vertical grid lines alternate direction,
+    The returned path starts at A.  Vertical grid lines alternate direction,
     avoiding the long diagonal return present in the original MATLAB script.
     ``x_segments`` and ``y_segments`` are division counts, therefore the
     result contains ``(x_segments + 1) * (y_segments + 1)`` points.
@@ -316,9 +316,9 @@ def plan_grid_path(
         u = ix / float(x_segments)
         bottom = tuple(D[k] + u * (C[k] - D[k]) for k in range(3))
         top = tuple(A[k] + u * (B[k] - A[k]) for k in range(3))
-        y_indices = range(y_segments + 1)
+        y_indices = range(y_segments, -1, -1)
         if ix % 2:
-            y_indices = range(y_segments, -1, -1)
+            y_indices = range(y_segments + 1)
         for iy in y_indices:
             v = iy / float(y_segments)
             point = tuple(

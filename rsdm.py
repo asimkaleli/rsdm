@@ -109,9 +109,20 @@ QGroupBox::title {
         )
 
         # --- Kamera ---
-        self.cam = CameraController(self.label, width=854, height=480, fps=30,
-                                    vflip=False, hflip=False)
-        self.cam.start()
+        self.cam = None
+        try:
+            # Brio 100, MJPEG akışında 1280x720 @ 30 FPS destekler. Görüntü
+            # 16:9 imageLabel alanına ölçeklenir.
+            self.cam = CameraController(
+                self.label, width=1280, height=720, fps=30,
+                vflip=False, hflip=False,
+            )
+            self.cam.start()
+        except Exception as camera_error:
+            # Kamera çıkarılırsa diğer ölçüm/tarama işlevleri çalışmaya devam etsin.
+            self.cam = None
+            print(f"[camera] BASLATILAMADI: {camera_error}")
+            sys.stdout.flush()
 
         # --- IMU ---
         self.ori_worker = OrientationWorker(i2c_addr=0x68, hz=50, use_mag=True,
@@ -149,11 +160,11 @@ QGroupBox::title {
 
             # 2) Motorlar
             self.motorX = MotorController(
-                MotorPins(step=12, dir=5), shared=self.shared,
+                MotorPins(step=13, dir=6), shared=self.shared,
                 backlash_steps=self.BACKLASH_X_STEPS,
             )  # Yaw ~ sağ/sol
             self.motorY = MotorController(
-                MotorPins(step=13, dir=6, dir_inverted=True), shared=self.shared,
+                MotorPins(step=12, dir=5, dir_inverted=True), shared=self.shared,
                 backlash_steps=self.BACKLASH_Y_STEPS,
             )  # Pitch ~ yukarı/aşağı
 
@@ -291,6 +302,15 @@ QGroupBox::title {
         self.label.setGeometry(old_label.geometry())
         self.label.setObjectName("imageLabel")
         self.label.setScaledContents(True)
+        self.label.setAlignment(Qt.AlignCenter)
+        self.label.setText(
+            "Kamera devre dışı\n"
+            "Nokta seçimi için bu alanı kullanabilirsiniz."
+        )
+        self.label.setStyleSheet(
+            "background-color: #202428; color: #aeb6bf; "
+            "border: 1px solid #59636e;"
+        )
         self.label.show()
         old_label.hide()
 
@@ -763,6 +783,22 @@ QGroupBox::title {
         if age < 0.0 or age > self._distance_max_age_seconds():
             return None
         return float(self._last_distance), self._last_distance_unit or ""
+
+    def _wait_for_distance_after(self, started_at: float) -> bool:
+        """Wait for a distance sample produced after reaching a scan target."""
+        timeout_s = self._distance_max_age_seconds()
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            QApplication.processEvents()
+            if self._scan_cancel_requested:
+                return False
+            received_at = self._last_distance_received_at
+            if (received_at is not None
+                    and float(received_at) > float(started_at)
+                    and self._fresh_distance_measurement() is not None):
+                return True
+            time.sleep(0.01)
+        return False
 
     def _invalidate_distance_selections(self):
         """Discard measurements/selections that must not survive laser-off."""
@@ -1641,11 +1677,8 @@ QGroupBox::title {
         self.label.update()
 
     def on_area_select_clicked(self, corner: str):
-        """Arm one corner selection; capture happens on the camera click."""
+        """Arm one corner selection; capture happens on the image-area click."""
         if self._scan_sequence_active or self._programmatic_motion_active:
-            return
-        if not self.label.pixmap():
-            QMessageBox.warning(self, "Area Scan", "Kamera görüntüsü hazır değil.")
             return
         if not self._position_capture_ready("Area Scan"):
             return
@@ -1762,10 +1795,10 @@ QGroupBox::title {
             QMessageBox.warning(self, "Area Scan", "Köşe mesafelerinin birimleri aynı değil.")
             return
 
-        # Normal seçim A→B→C→D şeklindedir ve tarama D'den başlar. D'ye
-        # sonradan dönmek güvenlidir; logical hedefler planda
-        # tutulduğu için oluşturma anında motorun D üzerinde olması gerekmez.
-        d_corner = self._area_corners["D"]
+        # Normal seçim A→B→C→D şeklindedir ve tarama ilk seçilen A'dan başlar.
+        # A'ya sonradan dönmek güvenlidir; logical hedefler planda tutulduğu
+        # için oluşturma anında motorun A üzerinde olması gerekmez.
+        start_corner = self._area_corners["A"]
 
         deg_per_step_x = (float(self.STEP_ANGLE_DEG_X)
                           / float(self.MICROSTEP_DIV_X)
@@ -1811,7 +1844,7 @@ QGroupBox::title {
         target_x_steps, target_y_steps = anchored_step_targets(
             result.get("pitch_steps_delta", []),
             result.get("yaw_steps_delta", []),
-            0, d_corner["steps_x"], d_corner["steps_y"],
+            0, start_corner["steps_x"], start_corner["steps_y"],
         )
         result["target_x_steps"] = target_x_steps
         result["target_y_steps"] = target_y_steps
@@ -1861,7 +1894,7 @@ QGroupBox::title {
         self._mark_position_unknown()
         QMessageBox.information(
             self, "Area Scan",
-            f"{len(dpy)} alan noktası oluşturuldu. Tarama D köşesinden başlayacak.",
+            f"{len(dpy)} alan noktası oluşturuldu. Tarama A köşesinden başlayacak.",
         )
 
     def _on_motorX_step(self, delta: int):
@@ -2265,8 +2298,6 @@ QGroupBox::title {
         if not self._require_backlash_ready("Sequential Scan"):
             return
         self._scan_cancel_requested = False
-        if not self.label.pixmap():
-            return
 
         if not self.label.first_point or not self.label.last_point:
             QMessageBox.information(self, "Bilgi", "Önce 'Select First Point' ve 'Select Last Point' ile iki nokta seçin.")
@@ -2532,7 +2563,7 @@ QGroupBox::title {
         1) Eğer tabloda pvStorePoint ile kaydedilmiş 'angle' satırları varsa:
            - Bunların tamamına sırayla gider (row0 → row1 → ...).
         2) Sequential planner sonucunu First→Last tarar.
-        3) Area planner sonucunu D'den başlayarak serpantin sırada tarar.
+        3) Area planner sonucunu A'dan başlayarak serpantin sırada tarar.
         """
         if self._scan_sequence_active:
             return
@@ -2643,9 +2674,28 @@ QGroupBox::title {
                 print("            [idle] iki motor da idle.")
                 sys.stdout.flush()
 
+                measurement_started_at = time.monotonic()
                 _, target_pitch, target_yaw = dpy[target_row]
                 self._set_log_target(target_row, target_pitch, target_yaw)
                 self._set_current_point(plan_type, target_row)
+
+                # Area taramasında eski/seyir hâlinde alınmış bir değeri
+                # kullanma. Hedefte durduktan sonra gelen yeni ölçümü bekle;
+                # böylece ilk A noktası da ölçülmeden atlanmaz.
+                if plan_type == "grid":
+                    print(
+                        f"            [measure] row={target_row} "
+                        "yeni mesafe ölçümü bekleniyor..."
+                    )
+                    sys.stdout.flush()
+                    if not self._wait_for_distance_after(measurement_started_at):
+                        if self._scan_cancel_requested:
+                            self._scan_sequence_active = False
+                            self._clear_log_target()
+                            return
+                        raise RuntimeError(
+                            f"Row {target_row} konumunda yeni mesafe ölçümü alınamadı."
+                        )
 
                 # Segmentler arası bekleme, sadece idle olduktan sonra başlar
                 if wait_s > 0:

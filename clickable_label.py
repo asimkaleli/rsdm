@@ -55,8 +55,6 @@ class ClickableLabel(QLabel):
 
     def paintEvent(self, event):
         super().paintEvent(event)
-        if not self.pixmap():
-            return
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
         pen = QPen(QColor("red")); pen.setWidth(2)

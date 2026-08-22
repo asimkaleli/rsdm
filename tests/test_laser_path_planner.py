@@ -36,9 +36,9 @@ class GridPlannerTests(unittest.TestCase):
         self.assertEqual(len(result["xyz"]), 9)
         self.assertEqual(
             result["grid_indices"],
-            [(0, 0), (0, 1), (0, 2),
-             (1, 2), (1, 1), (1, 0),
-             (2, 0), (2, 1), (2, 2)],
+            [(0, 2), (0, 1), (0, 0),
+             (1, 0), (1, 1), (1, 2),
+             (2, 2), (2, 1), (2, 0)],
         )
         for current, following in zip(
             result["grid_indices"], result["grid_indices"][1:]
@@ -48,10 +48,10 @@ class GridPlannerTests(unittest.TestCase):
             )
             self.assertEqual(manhattan, 1)
 
-    def test_path_starts_at_d_and_includes_all_corners(self):
+    def test_path_starts_at_a_and_includes_all_corners(self):
         result = self.plan(3, 2)
         indices = result["grid_indices"]
-        self.assertEqual(indices[0], (0, 0))
+        self.assertEqual(indices[0], (0, 2))
         self.assertIn((0, 2), indices)
         self.assertIn((3, 0), indices)
         self.assertIn((3, 2), indices)
